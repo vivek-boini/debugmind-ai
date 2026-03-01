@@ -48,56 +48,6 @@ This creates an autonomous improvement cycle.
 ---
 
 ## 🏗 Architecture
-# 🧠 DebugMind AI — Agentic AI Learning Mentor (MVP)
-
-DebugMind AI is an agentic learning system that analyzes LeetCode submission patterns and generates personalized improvement strategies.
-
-Instead of evaluating only correctness, DebugMind:
-
-- Detects conceptual weaknesses  
-- Sets mastery goals  
-- Assigns adaptive practice problems  
-- Monitors progress  
-- Runs a closed-loop improvement cycle  
-
----
-
-## 🚀 Demo Overview
-
-### 🔹 Home Screen – Profile Analysis
-![Home Screen](./assets/home.png)
-
-User enters a LeetCode profile URL and triggers AI analysis.
-
----
-
-### 🔹 AI Agent Dashboard
-![Dashboard](./assets/dashboard.png)
-
-The system displays:
-
-- Ranked weak topics  
-- Confidence scores  
-- Evidence from submission patterns  
-- Strategy summary  
-- Agent timeline  
-- Recommended problems  
-
----
-
-## 🔁 Agent Loop Process
-
-1. Diagnose weak topics from submission evolution  
-2. Set mastery goals  
-3. Assign practice strategy  
-4. Monitor progress  
-5. Adapt strategy if necessary  
-
-This creates an autonomous improvement cycle.
-
----
-
-## 🏗 Architecture
 ```
 Frontend (React + Vite)
             ↓
