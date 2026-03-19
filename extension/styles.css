@@ -1,0 +1,29 @@
+.extract-btn-injected {
+  background: linear-gradient(90deg, #6b5cff, #4ad9c8);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin: 4px 12px;
+  box-shadow: 0 4px 10px rgba(107, 92, 255, 0.2);
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  z-index: 9999;
+}
+
+.extract-btn-injected:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 14px rgba(107, 92, 255, 0.3);
+}
+
+.extract-btn-injected:active {
+  transform: translateY(0);
+}
+
+.extract-btn-injected:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  transform: none;
+}
