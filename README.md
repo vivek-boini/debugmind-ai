@@ -60,16 +60,6 @@ npm run dev
 
 ---
 
-## 📸 Screenshots
-
-*(Placeholders for images)*
-
-- **Dashboard:** `![Dashboard Screenshot](assets/Dashboard.png)`
-- **Extension Button:** `![Extension Screenshot](assets/home.png)`
-- **Insights:** `![Insights Screenshot](assets/home.png)`
-
----
-
 ## ⚠️ Disclaimer
 
 *This project extracts only user-authorized data for educational purposes and does not perform large-scale scraping or violate platform policies.*
@@ -77,37 +67,11 @@ npm run dev
 
 ---
 
-## ⚙️ Setup Instructions
-
-### 1. Backend
-```bash
-cd backend
-npm install
-node index.js
-```
-*Server runs on `http://localhost:4000`*
-
-### 2. Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-```
-*App runs on `http://localhost:3000`*
-
-### 3. Extension
-1. Open Chrome and navigate to `chrome://extensions/`.
-2. Enable **Developer mode**.
-3. Click **Load unpacked** and select the `extension/` directory.
-4. Go to LeetCode and look for the **"Extract AI Data"** button in the navbar.
-
----
-
 ## 📸 Screenshots
 
 | Dashboard Overview | Extension Integration | Conceptual Insights |
 | :--- | :--- | :--- |
-| ![Dashboard](./assets/Dashboard.png) | ![Home](./assets/home.png) | (Dashboard showing detailed alerts) |
+| ![Dashboard](./assets/Dashboard.png) | ![Recomendations](./assets/Recomendation.png) | (Dashboard showing detailed alerts) |
 
 ---
 
