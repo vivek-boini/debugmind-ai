@@ -4,14 +4,14 @@
   --color-dark-900: #071018;
   --color-dark-800: #0e171c;
   --color-dark-700: #152129;
-  
+
   --color-accent-purple: #6b5cff;
   --color-accent-teal: #4ad9c8;
-  
+
   --color-border: #1e293b;
   --color-input: #1e293b;
   --color-ring: #8c7cff;
-  
+
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
 
   @keyframes fade-in {
@@ -19,8 +19,16 @@
     to { opacity: 1; }
   }
   @keyframes slide-in-from-bottom {
-    from { transform: translateY(100%); }
-    to { transform: translateY(0); }
+    from { transform: translateY(20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  @keyframes slide-in-from-left {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(0); }
+  }
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(107, 92, 255, 0.4); }
+    50% { box-shadow: 0 0 0 8px rgba(107, 92, 255, 0); }
   }
 }
 
@@ -38,7 +46,7 @@
     @apply hover:border-accent-purple/50 hover:shadow-accent-purple/5;
   }
   .btn-primary {
-    @apply bg-gradient-to-r from-accent-purple to-accent-teal text-white font-semibold py-2.5 px-6 rounded-lg shadow-lg hover:opacity-90 active:scale-95 transition-all disabled:opacity-50;
+    @apply bg-linear-to-r from-accent-purple to-accent-teal text-white font-semibold py-2.5 px-6 rounded-lg shadow-lg hover:opacity-90 active:scale-95 transition-all disabled:opacity-50;
   }
   .sidebar-link {
     @apply flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors;
@@ -46,17 +54,29 @@
   .sidebar-link-active {
     @apply text-white bg-slate-800 border-l-4 border-accent-purple;
   }
-  
-  /* Manual utility for animations used in App.jsx */
+
+  /* Animation utilities */
   .animate-in {
     animation-fill-mode: forwards;
   }
   .fade-in {
-    animation: fade-in 0.7s ease-out;
+    animation: fade-in 0.5s ease-out;
   }
   .slide-in-from-bottom {
     animation: slide-in-from-bottom 0.3s ease-out;
   }
+  .slide-in-from-left {
+    animation: slide-in-from-left 0.3s ease-out;
+  }
+  .pulse-glow {
+    animation: pulse-glow 2s infinite;
+  }
+
+  /* Duration utilities */
+  .duration-200 { animation-duration: 200ms; }
+  .duration-300 { animation-duration: 300ms; }
+  .duration-500 { animation-duration: 500ms; }
+  .duration-700 { animation-duration: 700ms; }
 }
 
 /* Custom Scrollbar */
