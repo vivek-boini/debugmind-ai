@@ -390,9 +390,9 @@ export const GoalsPanel = ({ goals }) => {
       </div>
       <div className="space-y-4">
         {goals.slice(0, 3).map((goal, index) => (
-          <div key={goal.id || index} className="p-4 bg-dark-900/50 rounded-lg border border-slate-800">
-            <div className="flex items-start justify-between mb-3">
-              <div>
+          <div key={goal.id || index} className="p-4 bg-dark-900/50 rounded-lg border border-slate-800 hover:border-slate-700 transition-colors">
+            <div className="flex items-start justify-between mb-2">
+              <div className="flex-1">
                 <h4 className="font-semibold text-sm">{goal.topic}</h4>
                 <p className="text-xs text-slate-500 mt-0.5">{goal.deadline_days} days remaining</p>
               </div>
@@ -400,6 +400,12 @@ export const GoalsPanel = ({ goals }) => {
                 {goal.severity}
               </Badge>
             </div>
+
+            {/* Dynamic Description */}
+            {goal.description && (
+              <p className="text-xs text-slate-400 mb-3 line-clamp-2">{goal.description}</p>
+            )}
+
             <div className="flex items-center gap-4 mb-3">
               <div className="text-center">
                 <div className="text-lg font-bold text-red-400">{goal.current_score}%</div>
@@ -412,6 +418,16 @@ export const GoalsPanel = ({ goals }) => {
               </div>
             </div>
             <ProgressBar value={Math.round((goal.current_score / goal.target_score) * 100)} color="#4ad9c8" showLabel={false} />
+
+            {/* Milestones preview */}
+            {goal.milestones && goal.milestones.length > 0 && (
+              <div className="mt-3 pt-2 border-t border-slate-700">
+                <div className="flex items-center gap-1 text-[10px] text-slate-500">
+                  <CheckCircle2 size={10} />
+                  {goal.milestones.length} milestones
+                </div>
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -435,6 +451,7 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
 
   const currentDay = plan.current_day || 1;
   const todaysPlan = plan.plan.filter(p => p.day === currentDay);
+  const personalization = plan.personalization || [];
 
   return (
     <Card>
@@ -451,6 +468,20 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
         </div>
       </div>
 
+      {/* Personalization Notes */}
+      {personalization.length > 0 && (
+        <div className="mb-4 p-3 bg-accent-teal/5 rounded-lg border border-accent-teal/20">
+          <h5 className="text-[10px] font-bold text-accent-teal uppercase tracking-wider mb-2">Why This Plan?</h5>
+          <ul className="space-y-1">
+            {personalization.slice(0, 3).map((note, idx) => (
+              <li key={idx} className="text-xs text-slate-400 flex items-start gap-1">
+                <span className="text-accent-teal">•</span> {note}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="mb-4">
         <h4 className="text-xs font-bold text-accent-teal uppercase tracking-wider mb-3">Today's Focus</h4>
         {todaysPlan.length > 0 ? (
@@ -464,15 +495,24 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
                   </Badge>
                 </div>
                 <p className="text-xs text-slate-400 mb-3">{item.objective}</p>
-                <div className="flex flex-wrap gap-2">
+                
+                {/* Problems */}
+                <div className="flex flex-wrap gap-2 mb-3">
                   {item.problems?.map((problem, pIdx) => (
-                    <a key={pIdx} href={problem.url || '#'} target="_blank" rel="noreferrer"
-                      className="flex items-center gap-1 px-2 py-1 bg-slate-800 rounded text-xs hover:bg-slate-700 transition-colors">
-                      {problem.lc_id || problem.title || problem}
-                      <ExternalLink size={10} />
+                    <a key={pIdx} href={problem.url || `https://leetcode.com/problems/${(problem.slug || problem.title || problem).toString().toLowerCase().replace(/\s+/g, '-')}/`} target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1 px-2 py-1 bg-slate-800 rounded text-xs hover:bg-slate-700 transition-colors group">
+                      <span>{problem.title || problem.lc_id || problem}</span>
+                      <ExternalLink size={10} className="opacity-50 group-hover:opacity-100" />
                     </a>
                   ))}
                 </div>
+
+                {/* Tip if available */}
+                {item.tip && (
+                  <p className="text-xs text-accent-teal italic p-2 bg-accent-teal/5 rounded">
+                    💡 {item.tip}
+                  </p>
+                )}
               </div>
             ))}
           </div>
@@ -480,6 +520,24 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
           <p className="text-sm text-slate-500 italic">No items for today</p>
         )}
       </div>
+
+      {/* Plan Summary */}
+      {plan.summary && (
+        <div className="pt-3 border-t border-slate-700 grid grid-cols-3 gap-2 text-center">
+          <div>
+            <div className="text-lg font-bold text-accent-purple">{plan.summary.total_problems || 0}</div>
+            <div className="text-[9px] text-slate-500 uppercase">Problems</div>
+          </div>
+          <div>
+            <div className="text-lg font-bold text-accent-teal">{plan.summary.topics_covered?.length || 0}</div>
+            <div className="text-[9px] text-slate-500 uppercase">Topics</div>
+          </div>
+          <div>
+            <div className="text-lg font-bold text-amber-400">{plan.summary.estimated_total_hours || '?'}h</div>
+            <div className="text-[9px] text-slate-500 uppercase">Est. Time</div>
+          </div>
+        </div>
+      )}
     </Card>
   );
 };
@@ -548,7 +606,10 @@ export const AdaptationPanel = ({ adaptation }) => {
     increase_difficulty: <TrendingUp size={16} className="text-emerald-400" />,
     simplify_problems: <RefreshCw size={16} className="text-amber-400" />,
     maintain_pace: <Activity size={16} className="text-blue-400" />,
-    change_strategy: <RefreshCw size={16} className="text-accent-purple" />
+    change_strategy: <RefreshCw size={16} className="text-accent-purple" />,
+    add_practice: <Target size={16} className="text-amber-400" />,
+    reset_foundation: <RefreshCw size={16} className="text-red-400" />,
+    pause_and_review: <Clock size={16} className="text-amber-400" />
   };
 
   return (
@@ -556,7 +617,7 @@ export const AdaptationPanel = ({ adaptation }) => {
       <div className="flex items-center justify-between mb-4">
         <h3 className="font-bold flex items-center gap-2">
           <Activity size={18} className="text-accent-teal" />
-          Strategy
+          Strategy Adaptation
         </h3>
         <Badge type="info">{Math.round(adaptation.confidence || 50)}% conf</Badge>
       </div>
@@ -571,14 +632,48 @@ export const AdaptationPanel = ({ adaptation }) => {
         </div>
       </div>
 
+      {/* Summary if available */}
+      {adaptation.summary && (
+        <p className="text-sm text-slate-300 mb-4 p-3 bg-dark-900/30 rounded-lg italic">
+          {adaptation.summary}
+        </p>
+      )}
+
+      {/* Strategy message if available */}
+      {adaptation.strategy?.message && (
+        <div className="p-3 bg-accent-purple/10 rounded-lg border border-accent-purple/20 mb-4">
+          <p className="text-xs text-accent-purple font-medium">{adaptation.strategy.emoji} {adaptation.strategy.message}</p>
+        </div>
+      )}
+
       {adaptation.recommendations?.length > 0 && (
-        <div className="space-y-2">
-          {adaptation.recommendations.slice(0, 2).map((rec, idx) => (
+        <div className="space-y-2 mb-4">
+          <h5 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Recommendations</h5>
+          {adaptation.recommendations.slice(0, 3).map((rec, idx) => (
             <div key={idx} className="flex items-start gap-2 p-2 bg-dark-900/50 rounded-lg text-xs">
-              <CheckCircle2 size={12} className="text-accent-teal shrink-0 mt-0.5" />
-              <span className="text-slate-300">{rec.text}</span>
+              <CheckCircle2 size={12} className={`shrink-0 mt-0.5 ${
+                rec.priority === 'high' ? 'text-red-400' :
+                rec.priority === 'medium' ? 'text-amber-400' : 'text-accent-teal'
+              }`} />
+              <div className="flex-1">
+                <span className="text-slate-300">{rec.text}</span>
+                {rec.action && (
+                  <span className="text-accent-teal ml-1">→ {rec.action}</span>
+                )}
+              </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Next check info */}
+      {adaptation.next_check && (
+        <div className="pt-3 border-t border-slate-700 text-xs text-slate-500 flex items-center gap-2">
+          <Clock size={12} />
+          Next review: {adaptation.next_check.interval}
+          {adaptation.next_check.tip && (
+            <span className="text-slate-400 ml-2">• {adaptation.next_check.tip}</span>
+          )}
         </div>
       )}
     </Card>

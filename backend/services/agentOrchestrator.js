@@ -89,11 +89,14 @@ async function runFullLoop(userId, submissions) {
       explanation: diagnosisLog.human_readable
     };
 
-    // Stage 3: Set Goals
+    // Stage 3: Set Goals (Enhanced - now receives more diagnosis data)
     memory.updateAgentStage(userId, STAGES.SETTING_GOALS);
     const goalsResult = agents.setGoals({
       weak_topics: diagnosis.weak_topics,
       confidence_scores: diagnosis.confidence_scores,
+      error_patterns: diagnosis.error_patterns,
+      confidence_level: diagnosis.confidence_level,
+      learning_velocity: diagnosis.learning_velocity,
       total_submissions: diagnosis.total_submissions
     });
     memory.storeGoals(userId, goalsResult.goals);
@@ -103,10 +106,10 @@ async function runFullLoop(userId, submissions) {
       agent: 'goalAgent',
       decision: goalsResult.goals.length > 0 ? 'goals_set' : 'no_goals_needed',
       reason: goalsResult.goals.length > 0
-        ? `Created ${goalsResult.goals.length} improvement goals. Top priority: ${goalsResult.most_critical} (targeting ${goalsResult.goals[0]?.target_score}%)`
+        ? `Created ${goalsResult.goals.length} personalized goals. Top priority: ${goalsResult.most_critical} (${goalsResult.goals[0]?.description_parts?.main || 'improving skills'})`
         : 'Performance is satisfactory across all topics',
       confidence: 0.82,
-      input_summary: `${diagnosis.weak_topics.length} weak topics requiring attention`,
+      input_summary: `${diagnosis.weak_topics.length} weak topics, confidence: ${diagnosis.confidence_level}`,
       output_summary: goalsResult.goals.map(g => `${g.topic}: ${g.current_score}% → ${g.target_score}% in ${g.deadline_days} days`).join('; ')
     });
     results.decisions.push(goalsLog);
@@ -115,19 +118,26 @@ async function runFullLoop(userId, submissions) {
       status: 'success',
       goals_count: goalsResult.goals?.length || 0,
       priority_topic: goalsResult.most_critical,
+      summary: goalsResult.summary,
       explanation: goalsLog.human_readable
     };
 
-    // Stage 4: Create Plan
+    // Stage 4: Create Plan (Enhanced - receives diagnosis context)
     memory.updateAgentStage(userId, STAGES.PLANNING);
-    const plan = agents.createPlan({ goals: goalsResult.goals });
+    const plan = agents.createPlan({ 
+      goals: goalsResult.goals,
+      diagnosis: diagnosis,
+      error_patterns: diagnosis.error_patterns,
+      confidence_level: diagnosis.confidence_level,
+      learning_velocity: diagnosis.learning_velocity
+    });
     memory.storePlan(userId, plan);
 
     // Log planning decision
     const planLog = logger.logDecision(userId, {
       agent: 'planningAgent',
       decision: 'plan_created',
-      reason: `Generated ${plan.summary?.total_days}-day learning roadmap with ${plan.summary?.total_problems} curated problems progressing from easy to hard`,
+      reason: `Generated ${plan.summary?.total_days}-day personalized roadmap with ${plan.summary?.total_problems} curated problems. ${plan.personalization?.[0] || 'Standard progression.'}`,
       confidence: 0.85,
       input_summary: `${goalsResult.goals.length} goals to address`,
       output_summary: `Plan covers: ${plan.summary?.topics_covered?.join(', ')}. Estimated ${plan.summary?.estimated_total_hours || 'N/A'} hours`
@@ -156,10 +166,10 @@ async function runFullLoop(userId, submissions) {
     const monitorLog = logger.logDecision(userId, {
       agent: 'monitoringAgent',
       decision: monitoring.status,
-      reason: `Current success rate: ${monitoring.progress?.success_rate}%. ${monitoring.trend?.message || 'Establishing performance baseline'}`,
+      reason: `${monitoring.status_message || `Current success rate: ${monitoring.progress?.success_rate}%.`} ${monitoring.trend?.message || 'Establishing performance baseline'}`,
       confidence: monitoring.trend?.confidence === 'high' ? 0.9 : 0.7,
       input_summary: `Tracking ${submissions.length} submissions`,
-      output_summary: `Status: ${monitoring.status}. Trend: ${monitoring.trend?.direction || 'establishing'}`
+      output_summary: `Status: ${monitoring.status}. Trend: ${monitoring.trend?.direction || 'establishing'}. ${monitoring.summary || ''}`
     });
     results.decisions.push(monitorLog);
 
@@ -167,15 +177,17 @@ async function runFullLoop(userId, submissions) {
       status: 'success',
       current_status: monitoring.status,
       success_rate: monitoring.progress?.success_rate,
+      insights: monitoring.insights,
       explanation: monitorLog.human_readable
     };
 
-    // Stage 6: Adaptation
+    // Stage 6: Adaptation (Enhanced - receives diagnosis for deeper personalization)
     memory.updateAgentStage(userId, STAGES.ADAPTING);
     const adaptation = agents.adapt({
       monitoring_result: monitoring,
       current_plan: plan,
-      goals: goalsResult.goals
+      goals: goalsResult.goals,
+      diagnosis: diagnosis
     });
     memory.storeAdaptation(userId, adaptation);
 
@@ -183,7 +195,7 @@ async function runFullLoop(userId, submissions) {
     const adaptLog = logger.logDecision(userId, {
       agent: 'adaptationAgent',
       decision: adaptation.action,
-      reason: adaptation.reason,
+      reason: adaptation.summary || adaptation.reason,
       confidence: (adaptation.confidence || 50) / 100,
       input_summary: `Performance: ${monitoring.status}, Success rate: ${monitoring.progress?.success_rate}%`,
       output_summary: adaptation.strategy?.message || `Action: ${adaptation.action}`,
@@ -195,6 +207,7 @@ async function runFullLoop(userId, submissions) {
       status: 'success',
       action: adaptation.action,
       confidence: adaptation.confidence,
+      next_steps: adaptation.next_steps,
       explanation: adaptLog.human_readable
     };
 

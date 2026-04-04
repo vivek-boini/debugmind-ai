@@ -1,9 +1,16 @@
 /**
- * Monitoring Agent
- * Tracks user progress and detects patterns
+ * Monitoring Agent (Enhanced)
+ * Tracks user progress, detects patterns, and generates actionable insights
  *
- * Input: { new_submissions, previous_progress, goals }
- * Output: { progress, status, trends, alerts }
+ * Features:
+ * - Deep trend analysis with multiple time windows
+ * - Personalized alerts and suggestions
+ * - Topic-specific progress tracking
+ * - Learning velocity calculation
+ * - Engagement metrics
+ *
+ * Input: { new_submissions, previous_progress, goals, classifyProblem }
+ * Output: { progress, status, trends, alerts, insights, recommendations }
  */
 
 // Status thresholds
@@ -17,13 +24,28 @@ const THRESHOLDS = {
 // Minimum submissions for reliable analysis
 const MIN_SUBMISSIONS_FOR_TREND = 5;
 
+// Status normalization
+function normalizeStatus(status) {
+  if (!status) return 'Other';
+  const s = status.toLowerCase();
+  if (s.includes('accepted')) return 'Accepted';
+  if (s.includes('wrong')) return 'Wrong Answer';
+  if (s.includes('time limit') || s.includes('tle')) return 'Time Limit Exceeded';
+  if (s.includes('runtime')) return 'Runtime Error';
+  if (s.includes('memory')) return 'Memory Limit Exceeded';
+  if (s.includes('compile')) return 'Compile Error';
+  return 'Other';
+}
+
 /**
  * Calculate success rate from submissions
  */
 function calculateSuccessRate(submissions) {
   if (!submissions || submissions.length === 0) return 0;
 
-  const accepted = submissions.filter(s => s.statusDisplay === 'Accepted').length;
+  const accepted = submissions.filter(s => 
+    normalizeStatus(s.statusDisplay || s.status) === 'Accepted'
+  ).length;
   return Math.round((accepted / submissions.length) * 100);
 }
 
@@ -46,41 +68,46 @@ function detectTrend(currentRate, previousRate, attempts) {
       direction: 'improving',
       confidence: 'high',
       delta,
-      message: `Success rate improved by ${delta}%`
+      message: `Success rate improved by ${delta}%`,
+      recommendation: 'Keep up the great work! Consider increasing problem difficulty.'
     };
   } else if (delta > 5) {
     return {
       direction: 'slightly_improving',
       confidence: 'medium',
       delta,
-      message: `Slight improvement of ${delta}%`
+      message: `Slight improvement of ${delta}%`,
+      recommendation: 'Good progress! Stay consistent with your practice.'
     };
   } else if (delta < -10) {
     return {
       direction: 'declining',
       confidence: 'high',
       delta,
-      message: `Success rate dropped by ${Math.abs(delta)}%`
+      message: `Success rate dropped by ${Math.abs(delta)}%`,
+      recommendation: 'Consider reviewing fundamentals or taking a break to avoid burnout.'
     };
   } else if (delta < -5) {
     return {
       direction: 'slightly_declining',
       confidence: 'medium',
       delta,
-      message: `Slight decline of ${Math.abs(delta)}%`
+      message: `Slight decline of ${Math.abs(delta)}%`,
+      recommendation: 'Focus on quality over quantity. Review mistakes before moving on.'
     };
   } else {
     return {
       direction: 'stable',
       confidence: 'medium',
       delta,
-      message: 'Performance is stable'
+      message: 'Performance is stable',
+      recommendation: 'Try challenging yourself with slightly harder problems.'
     };
   }
 }
 
 /**
- * Analyze progress by topic
+ * Analyze progress by topic with deeper insights
  */
 function analyzeTopicProgress(submissions, topic, classifier) {
   const topicSubmissions = submissions.filter(s => {
@@ -92,8 +119,23 @@ function analyzeTopicProgress(submissions, topic, classifier) {
     return null;
   }
 
-  const accepted = topicSubmissions.filter(s => s.statusDisplay === 'Accepted').length;
+  const accepted = topicSubmissions.filter(s => 
+    normalizeStatus(s.statusDisplay || s.status) === 'Accepted'
+  ).length;
   const failed = topicSubmissions.length - accepted;
+
+  // Analyze error types
+  const errorBreakdown = {};
+  topicSubmissions.forEach(s => {
+    const status = normalizeStatus(s.statusDisplay || s.status);
+    if (status !== 'Accepted') {
+      errorBreakdown[status] = (errorBreakdown[status] || 0) + 1;
+    }
+  });
+
+  // Find most common error
+  const dominantError = Object.entries(errorBreakdown)
+    .sort((a, b) => b[1] - a[1])[0];
 
   return {
     topic,
@@ -101,12 +143,39 @@ function analyzeTopicProgress(submissions, topic, classifier) {
     accepted,
     failed,
     success_rate: Math.round((accepted / topicSubmissions.length) * 100),
-    problems_attempted: [...new Set(topicSubmissions.map(s => s.title))]
+    problems_attempted: [...new Set(topicSubmissions.map(s => s.title))],
+    error_breakdown: errorBreakdown,
+    dominant_error: dominantError ? dominantError[0] : null,
+    insight: generateTopicInsight(topic, accepted, failed, dominantError)
   };
 }
 
 /**
- * Check goal progress
+ * Generate insight for a topic
+ */
+function generateTopicInsight(topic, accepted, failed, dominantError) {
+  const total = accepted + failed;
+  const rate = Math.round((accepted / total) * 100);
+
+  if (rate >= 80) {
+    return `Strong performance in ${topic}! You're handling this topic well.`;
+  } else if (rate >= 60) {
+    if (dominantError) {
+      return `Making progress in ${topic}, but watch out for ${dominantError[0]} errors (${dominantError[1]} occurrences).`;
+    }
+    return `Good progress in ${topic}. Continue practicing to reach mastery.`;
+  } else if (rate >= 40) {
+    if (dominantError) {
+      return `${topic} needs attention. Focus on fixing ${dominantError[0]} issues which are your main challenge.`;
+    }
+    return `${topic} needs more focus. Consider reviewing the fundamentals.`;
+  } else {
+    return `Struggling with ${topic}. Start with easier problems and build up gradually.`;
+  }
+}
+
+/**
+ * Check goal progress with enhanced tracking
  */
 function checkGoalProgress(goal, currentTopicProgress) {
   if (!currentTopicProgress) {
@@ -114,7 +183,8 @@ function checkGoalProgress(goal, currentTopicProgress) {
       goal_id: goal.id,
       topic: goal.topic,
       status: 'no_activity',
-      message: 'No submissions for this topic yet'
+      message: 'No submissions for this topic yet',
+      recommendation: `Start practicing ${goal.topic} problems to make progress on this goal.`
     };
   }
 
@@ -123,17 +193,31 @@ function checkGoalProgress(goal, currentTopicProgress) {
   const progressNeeded = goal.target_score - currentScore;
   const progressPercent = Math.round((progressMade / (goal.target_score - goal.current_score)) * 100);
 
-  let status;
+  let status, message, recommendation;
   if (currentScore >= goal.target_score) {
     status = 'goal_achieved';
+    message = `Congratulations! You've achieved your ${goal.topic} goal!`;
+    recommendation = 'Consider setting a new challenge or moving to harder problems.';
   } else if (progressPercent >= 75) {
     status = 'almost_there';
+    message = `Almost there! Just ${progressNeeded}% more to reach your ${goal.topic} goal.`;
+    recommendation = 'Stay focused and keep practicing consistently.';
   } else if (progressPercent >= 50) {
     status = 'on_track';
+    message = `Good progress on ${goal.topic}. You're halfway to your target.`;
+    recommendation = 'Maintain your current pace to achieve the goal on time.';
   } else if (progressPercent >= 25) {
     status = 'needs_attention';
-  } else {
+    message = `Progress is slower than expected for ${goal.topic}.`;
+    recommendation = 'Increase daily practice time or focus on understanding patterns better.';
+  } else if (progressPercent > 0) {
     status = 'behind';
+    message = `Significantly behind on ${goal.topic} goal.`;
+    recommendation = 'Consider adjusting your timeline or dedicating more focused practice sessions.';
+  } else {
+    status = 'regressing';
+    message = `Performance in ${goal.topic} has declined.`;
+    recommendation = 'Review fundamentals and consider stepping back to easier problems.';
   }
 
   return {
@@ -145,60 +229,110 @@ function checkGoalProgress(goal, currentTopicProgress) {
     progress_needed: progressNeeded,
     progress_percent: Math.max(0, Math.min(100, progressPercent)),
     status,
-    days_remaining: goal.deadline_days, // This should be calculated from actual dates
+    message,
+    recommendation,
+    days_remaining: goal.deadline_days,
     on_track: status === 'on_track' || status === 'almost_there' || status === 'goal_achieved'
   };
 }
 
 /**
- * Generate alerts based on monitoring
+ * Generate personalized alerts based on monitoring
  */
-function generateAlerts(progress, trend, goalProgress) {
+function generateAlerts(progress, trend, goalProgress, topicAnalysis) {
   const alerts = [];
 
-  // Success rate alerts
+  // Success rate alerts with personalized suggestions
   if (progress.success_rate < 30) {
     alerts.push({
       type: 'critical',
       category: 'performance',
-      message: 'Success rate is critically low',
-      suggestion: 'Consider stepping back to easier problems'
+      title: 'Low Success Rate',
+      message: 'Success rate is critically low at ' + progress.success_rate + '%',
+      suggestion: 'Focus on one topic at a time. Start with the easiest problems and master patterns before moving on.',
+      action: 'reduce_difficulty'
     });
   } else if (progress.success_rate < 50) {
     alerts.push({
       type: 'warning',
       category: 'performance',
-      message: 'Success rate needs improvement',
-      suggestion: 'Focus on understanding patterns before attempting more problems'
+      title: 'Needs Improvement',
+      message: 'Success rate of ' + progress.success_rate + '% needs work',
+      suggestion: 'Spend more time understanding each problem before coding. Review your failed attempts.',
+      action: 'review_patterns'
     });
   }
 
-  // Trend alerts
+  // Trend alerts with context
   if (trend.direction === 'declining') {
     alerts.push({
       type: 'warning',
       category: 'trend',
-      message: 'Performance is declining',
-      suggestion: 'Take a break or review fundamentals'
+      title: 'Performance Declining',
+      message: trend.message,
+      suggestion: trend.recommendation || 'Take a break or review fundamentals',
+      action: 'take_break'
+    });
+  } else if (trend.direction === 'improving') {
+    alerts.push({
+      type: 'success',
+      category: 'trend',
+      title: 'Great Progress!',
+      message: trend.message,
+      suggestion: trend.recommendation || 'Keep up the great work!',
+      action: 'increase_challenge'
+    });
+  }
+
+  // Topic-specific alerts
+  if (topicAnalysis) {
+    Object.entries(topicAnalysis).forEach(([topic, data]) => {
+      if (data.success_rate < 40 && data.attempts >= 3) {
+        alerts.push({
+          type: 'warning',
+          category: 'topic',
+          title: `Struggling with ${topic}`,
+          message: `Only ${data.success_rate}% success rate in ${topic} after ${data.attempts} attempts`,
+          suggestion: `Focus on ${topic} fundamentals before attempting more problems`,
+          action: 'focus_topic',
+          topic
+        });
+      }
     });
   }
 
   // Goal progress alerts
   if (goalProgress) {
     goalProgress.forEach(gp => {
-      if (gp.status === 'behind') {
+      if (gp.status === 'behind' || gp.status === 'regressing') {
         alerts.push({
           type: 'warning',
           category: 'goal',
-          message: `Behind on ${gp.topic} goal`,
-          suggestion: 'Increase daily practice or adjust timeline'
+          title: `Behind on ${gp.topic}`,
+          message: gp.message,
+          suggestion: gp.recommendation,
+          action: 'extend_deadline',
+          topic: gp.topic
         });
       } else if (gp.status === 'goal_achieved') {
         alerts.push({
           type: 'success',
           category: 'goal',
-          message: `Goal achieved for ${gp.topic}!`,
-          suggestion: 'Consider setting a new, more challenging goal'
+          title: `Goal Achieved: ${gp.topic}!`,
+          message: gp.message,
+          suggestion: gp.recommendation,
+          action: 'new_goal',
+          topic: gp.topic
+        });
+      } else if (gp.status === 'almost_there') {
+        alerts.push({
+          type: 'info',
+          category: 'goal',
+          title: `Almost There: ${gp.topic}`,
+          message: gp.message,
+          suggestion: gp.recommendation,
+          action: 'final_push',
+          topic: gp.topic
         });
       }
     });
@@ -209,8 +343,10 @@ function generateAlerts(progress, trend, goalProgress) {
     alerts.push({
       type: 'info',
       category: 'activity',
-      message: 'Low activity detected',
-      suggestion: 'Try to maintain consistent daily practice'
+      title: 'Increase Practice',
+      message: 'Only ' + progress.attempts + ' submission(s) recorded',
+      suggestion: 'Try to solve at least 2-3 problems daily for consistent improvement',
+      action: 'increase_activity'
     });
   }
 
@@ -218,11 +354,86 @@ function generateAlerts(progress, trend, goalProgress) {
 }
 
 /**
- * Calculate streaks
+ * Generate learning insights based on patterns
+ */
+function generateLearningInsights(submissions, progress, trend, topicAnalysis) {
+  const insights = [];
+
+  // Pattern detection
+  const problemAttempts = {};
+  submissions.forEach(s => {
+    if (!problemAttempts[s.title]) {
+      problemAttempts[s.title] = { attempts: 0, solved: false };
+    }
+    problemAttempts[s.title].attempts++;
+    if (normalizeStatus(s.statusDisplay || s.status) === 'Accepted') {
+      problemAttempts[s.title].solved = true;
+    }
+  });
+
+  // Persistence insight
+  const hardWonProblems = Object.entries(problemAttempts)
+    .filter(([_, data]) => data.solved && data.attempts > 3);
+  
+  if (hardWonProblems.length > 0) {
+    insights.push({
+      type: 'positive',
+      title: 'Persistence Pays Off',
+      description: `You've solved ${hardWonProblems.length} problem(s) after multiple attempts. This shows great determination!`,
+      examples: hardWonProblems.slice(0, 2).map(([name]) => name)
+    });
+  }
+
+  // Giving up pattern
+  const abandonedProblems = Object.entries(problemAttempts)
+    .filter(([_, data]) => !data.solved && data.attempts < 3);
+  
+  if (abandonedProblems.length > 3) {
+    insights.push({
+      type: 'improvement',
+      title: 'Try More Approaches',
+      description: `You've given up on ${abandonedProblems.length} problems after only 1-2 attempts. Consider trying at least 3-4 different approaches before moving on.`,
+      recommendation: 'Persistence builds problem-solving skills'
+    });
+  }
+
+  // Topic variety
+  const topicsAttempted = Object.keys(topicAnalysis || {}).length;
+  if (topicsAttempted === 1) {
+    insights.push({
+      type: 'suggestion',
+      title: 'Diversify Your Practice',
+      description: 'You\'re focusing on just one topic. Try mixing different topics to build well-rounded skills.',
+      recommendation: 'Variety helps reinforce connections between concepts'
+    });
+  } else if (topicsAttempted >= 5) {
+    insights.push({
+      type: 'positive',
+      title: 'Well-Rounded Practice',
+      description: `Great job practicing across ${topicsAttempted} different topics!`,
+      recommendation: 'Consider deep-diving into your weakest topic next'
+    });
+  }
+
+  // Learning velocity insight
+  if (trend.direction === 'improving' && progress.success_rate >= 60) {
+    insights.push({
+      type: 'positive',
+      title: 'Rapid Improvement',
+      description: 'You\'re improving faster than average! Your learning approach is working well.',
+      recommendation: 'Consider tackling more challenging problems'
+    });
+  }
+
+  return insights;
+}
+
+/**
+ * Calculate streaks and engagement
  */
 function calculateStreaks(submissions) {
   if (!submissions || submissions.length === 0) {
-    return { current: 0, longest: 0, days_active: 0 };
+    return { current: 0, longest: 0, days_active: 0, engagement_level: 'inactive' };
   }
 
   // Sort by timestamp
@@ -238,11 +449,39 @@ function calculateStreaks(submissions) {
     })
   );
 
+  // Calculate engagement level
+  let engagementLevel;
+  if (activeDays.size >= 7) {
+    engagementLevel = 'highly_active';
+  } else if (activeDays.size >= 4) {
+    engagementLevel = 'active';
+  } else if (activeDays.size >= 2) {
+    engagementLevel = 'moderate';
+  } else {
+    engagementLevel = 'low';
+  }
+
   return {
-    current: activeDays.size > 0 ? 1 : 0, // Simplified
+    current: activeDays.size > 0 ? 1 : 0,
     longest: activeDays.size,
-    days_active: activeDays.size
+    days_active: activeDays.size,
+    engagement_level: engagementLevel,
+    engagement_message: getEngagementMessage(engagementLevel)
   };
+}
+
+/**
+ * Get engagement message
+ */
+function getEngagementMessage(level) {
+  const messages = {
+    highly_active: 'Excellent consistency! You\'re building strong habits.',
+    active: 'Good activity level. Keep up the regular practice!',
+    moderate: 'You\'re making progress. Try to practice more consistently.',
+    low: 'Try to practice more regularly for better results.',
+    inactive: 'Start practicing to build momentum!'
+  };
+  return messages[level] || 'Keep practicing!';
 }
 
 /**
@@ -265,15 +504,19 @@ function monitor(input) {
       alerts: [{
         type: 'info',
         category: 'activity',
+        title: 'No Activity',
         message: 'No new submissions to analyze',
         suggestion: 'Start practicing to see your progress'
       }],
+      insights: [],
       timestamp: new Date().toISOString()
     };
   }
 
   // Calculate current progress
-  const accepted = new_submissions.filter(s => s.statusDisplay === 'Accepted').length;
+  const accepted = new_submissions.filter(s => 
+    normalizeStatus(s.statusDisplay || s.status) === 'Accepted'
+  ).length;
   const failed = new_submissions.length - accepted;
   const successRate = calculateSuccessRate(new_submissions);
 
@@ -282,25 +525,34 @@ function monitor(input) {
     attempts: new_submissions.length,
     accepted,
     failed,
-    unique_problems: [...new Set(new_submissions.map(s => s.title))].length
+    unique_problems: [...new Set(new_submissions.map(s => s.title))].length,
+    acceptance_rate_display: `${accepted}/${new_submissions.length} (${successRate}%)`
   };
+
+  // Analyze by topic
+  const topicAnalysis = analyzeByTopic(new_submissions, classifyProblem);
 
   // Calculate trend
   const previousRate = previous_progress?.success_rate || 0;
   const trend = detectTrend(successRate, previousRate, new_submissions.length);
 
-  // Determine overall status
-  let status;
+  // Determine overall status with context
+  let status, statusMessage;
   if (successRate >= 70 && trend.direction.includes('improving')) {
     status = 'excelling';
+    statusMessage = 'You\'re on fire! Excellent performance and improving trend.';
   } else if (successRate >= 60 || trend.direction.includes('improving')) {
     status = 'improving';
+    statusMessage = 'Good progress! Keep building on this momentum.';
   } else if (successRate >= 40) {
     status = 'stable';
+    statusMessage = 'Consistent performance. Look for areas to push harder.';
   } else if (trend.direction.includes('declining')) {
     status = 'struggling';
+    statusMessage = 'Performance needs attention. Consider reviewing fundamentals.';
   } else {
     status = 'needs_focus';
+    statusMessage = 'Time to refocus. Start with easier problems and build up.';
   }
 
   // Check goal progress
@@ -313,19 +565,51 @@ function monitor(input) {
   const streaks = calculateStreaks(new_submissions);
 
   // Generate alerts
-  const alerts = generateAlerts(progress, trend, goalProgress);
+  const alerts = generateAlerts(progress, trend, goalProgress, topicAnalysis);
+
+  // Generate insights
+  const insights = generateLearningInsights(new_submissions, progress, trend, topicAnalysis);
 
   return {
     progress,
     status,
+    status_message: statusMessage,
     status_emoji: getStatusEmoji(status),
     trend,
     goal_progress: goalProgress,
     streaks,
     alerts,
-    by_topic: analyzeByTopic(new_submissions, classifyProblem),
+    insights,
+    by_topic: topicAnalysis,
+    summary: generateMonitoringSummary(progress, trend, goalProgress, streaks),
     timestamp: new Date().toISOString()
   };
+}
+
+/**
+ * Generate monitoring summary
+ */
+function generateMonitoringSummary(progress, trend, goalProgress, streaks) {
+  const goalsOnTrack = goalProgress.filter(g => g.on_track).length;
+  const totalGoals = goalProgress.length;
+
+  let summary = `Performance: ${progress.success_rate}% success rate (${progress.accepted}/${progress.attempts}). `;
+  
+  if (trend.direction === 'improving') {
+    summary += 'Trend is positive! ';
+  } else if (trend.direction === 'declining') {
+    summary += 'Trend needs attention. ';
+  }
+
+  if (totalGoals > 0) {
+    summary += `Goals: ${goalsOnTrack}/${totalGoals} on track. `;
+  }
+
+  if (streaks.engagement_level === 'highly_active') {
+    summary += 'Great consistency!';
+  }
+
+  return summary;
 }
 
 /**
@@ -344,7 +628,7 @@ function getStatusEmoji(status) {
 }
 
 /**
- * Analyze submissions by topic
+ * Analyze submissions by topic with enhanced metrics
  */
 function analyzeByTopic(submissions, classifyProblem) {
   if (!classifyProblem) return {};
@@ -352,23 +636,43 @@ function analyzeByTopic(submissions, classifyProblem) {
   const byTopic = {};
   submissions.forEach(sub => {
     const topic = classifyProblem(sub.title);
+    const status = normalizeStatus(sub.statusDisplay || sub.status);
+    
     if (!byTopic[topic]) {
-      byTopic[topic] = { attempts: 0, accepted: 0 };
+      byTopic[topic] = { 
+        attempts: 0, 
+        accepted: 0,
+        error_types: {},
+        problems: new Set()
+      };
     }
     byTopic[topic].attempts++;
-    if (sub.statusDisplay === 'Accepted') {
+    byTopic[topic].problems.add(sub.title);
+    
+    if (status === 'Accepted') {
       byTopic[topic].accepted++;
+    } else {
+      byTopic[topic].error_types[status] = (byTopic[topic].error_types[status] || 0) + 1;
     }
   });
 
-  // Calculate rates
+  // Calculate rates and insights
   Object.keys(byTopic).forEach(topic => {
-    byTopic[topic].success_rate = Math.round(
-      (byTopic[topic].accepted / byTopic[topic].attempts) * 100
+    const data = byTopic[topic];
+    data.success_rate = Math.round((data.accepted / data.attempts) * 100);
+    data.unique_problems = data.problems.size;
+    data.dominant_error = Object.entries(data.error_types)
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    data.insight = generateTopicInsight(
+      topic, 
+      data.accepted, 
+      data.attempts - data.accepted,
+      data.dominant_error ? [data.dominant_error, data.error_types[data.dominant_error]] : null
     );
+    delete data.problems; // Remove Set before returning
   });
 
   return byTopic;
 }
 
-export { monitor, calculateSuccessRate, detectTrend };
+export { monitor, calculateSuccessRate, detectTrend, normalizeStatus };
