@@ -445,4 +445,4 @@ function calculateNextCheck(action) {
   };
 }
 
-module.exports = { adapt, getActionFromSuccessRate, STRATEGY_MODIFICATIONS };
+export { adapt, getActionFromSuccessRate, STRATEGY_MODIFICATIONS };

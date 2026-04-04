@@ -290,7 +290,7 @@ function importState(userId, state) {
   });
 }
 
-module.exports = {
+export {
   getState,
   updateState,
   updateField,

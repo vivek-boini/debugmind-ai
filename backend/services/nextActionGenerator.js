@@ -366,7 +366,7 @@ function generateStrategyEvolution(adaptations) {
   };
 }
 
-module.exports = {
+export {
   generateNextAction,
   generateAlerts,
   generateStrategyEvolution

@@ -199,4 +199,4 @@ function detectPatterns(submissions, problemStats) {
   return patterns;
 }
 
-module.exports = { diagnose, classifyProblem, TOPIC_KEYWORDS };
+export { diagnose, classifyProblem, TOPIC_KEYWORDS };

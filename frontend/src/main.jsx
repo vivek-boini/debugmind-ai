@@ -5,6 +5,7 @@ import { AppProvider } from './context/AppContext';
 import App from './App';
 import Landing from './pages/Landing';
 import Dashboard from './pages/Dashboard';
+import CodeAnalysis from './pages/CodeAnalysis';
 import Goals from './pages/Goals';
 import Insights from './pages/Insights';
 import Recommendations from './pages/Recommendations';
@@ -23,6 +24,7 @@ createRoot(document.getElementById('root')).render(
           {/* App layout with sidebar/navbar */}
           <Route element={<App />}>
             <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/code-analysis" element={<CodeAnalysis />} />
             <Route path="/goals" element={<Goals />} />
             <Route path="/insights" element={<Insights />} />
             <Route path="/recommendations" element={<Recommendations />} />

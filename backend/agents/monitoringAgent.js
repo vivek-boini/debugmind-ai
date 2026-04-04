@@ -371,4 +371,4 @@ function analyzeByTopic(submissions, classifyProblem) {
   return byTopic;
 }
 
-module.exports = { monitor, calculateSuccessRate, detectTrend };
+export { monitor, calculateSuccessRate, detectTrend };

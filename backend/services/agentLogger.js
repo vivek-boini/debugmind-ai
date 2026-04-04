@@ -250,7 +250,7 @@ function exportLogs(userId) {
   return getLogs(userId);
 }
 
-module.exports = {
+export {
   logDecision,
   getLogs,
   getDecisionTimeline,

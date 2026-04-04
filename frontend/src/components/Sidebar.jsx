@@ -1,10 +1,11 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Target, Zap, BookOpen, TrendingUp, Settings, LogOut, Menu, X } from 'lucide-react';
+import { LayoutDashboard, Target, Zap, BookOpen, TrendingUp, Settings, LogOut, Menu, X, Code2 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 const navItems = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { path: '/code-analysis', label: 'Code Analysis', icon: Code2 },
   { path: '/goals', label: 'Goals & Plan', icon: Target },
   { path: '/insights', label: 'Insights', icon: Zap },
   { path: '/recommendations', label: 'Recommendations', icon: BookOpen },

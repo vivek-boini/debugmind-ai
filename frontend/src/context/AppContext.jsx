@@ -14,6 +14,7 @@ export function AppProvider({ children }) {
   const [user, setUser] = useState(() => localStorage.getItem('debugmind_user') || null);
   const [data, setData] = useState(null);
   const [agentState, setAgentState] = useState(null);
+  const [codeAnalysis, setCodeAnalysis] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [isPolling, setIsPolling] = useState(false);
@@ -176,6 +177,53 @@ export function AppProvider({ children }) {
     if (user) fetchAgentState(user);
   }, [user, fetchAgentState]);
 
+  // Fetch code analysis
+  const fetchCodeAnalysis = useCallback(async (forceRefresh = false) => {
+    if (!user) return null;
+
+    const sanitizedUser = user.toLowerCase().trim();
+    console.log('[AppContext] Fetching code analysis for:', sanitizedUser);
+
+    try {
+      // Check localStorage first (unless forcing refresh)
+      if (!forceRefresh) {
+        const cached = localStorage.getItem(`debugmind_codeanalysis_${sanitizedUser}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          setCodeAnalysis(parsed);
+          return parsed;
+        }
+      }
+
+      // Fetch from API
+      const url = forceRefresh 
+        ? `${API_BASE_URL}/code-analysis`
+        : `${API_BASE_URL}/code-analysis/${sanitizedUser}`;
+      
+      const options = forceRefresh 
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: sanitizedUser, forceRefresh: true })
+          }
+        : { method: 'GET' };
+
+      const res = await fetch(url, options);
+      
+      if (res.ok) {
+        const data = await res.json();
+        setCodeAnalysis(data);
+        localStorage.setItem(`debugmind_codeanalysis_${sanitizedUser}`, JSON.stringify(data));
+        return data;
+      }
+      
+      return null;
+    } catch (e) {
+      console.error('[AppContext] Failed to fetch code analysis:', e);
+      return null;
+    }
+  }, [user]);
+
   // Mark notification as read
   const markNotificationRead = useCallback((id) => {
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
@@ -193,6 +241,18 @@ export function AppProvider({ children }) {
         setIsPolling(true);
       } catch (e) {
         localStorage.removeItem('debugmind_data');
+      }
+    }
+
+    // Also load cached code analysis
+    if (user) {
+      const cachedAnalysis = localStorage.getItem(`debugmind_codeanalysis_${user.toLowerCase()}`);
+      if (cachedAnalysis) {
+        try {
+          setCodeAnalysis(JSON.parse(cachedAnalysis));
+        } catch (e) {
+          localStorage.removeItem(`debugmind_codeanalysis_${user.toLowerCase()}`);
+        }
       }
     }
   }, [user]);
@@ -238,6 +298,7 @@ export function AppProvider({ children }) {
     user,
     data,
     agentState,
+    codeAnalysis,
     loading,
     error,
     isPolling,
@@ -249,17 +310,20 @@ export function AppProvider({ children }) {
     logout,
     analyze,
     fetchAgentState,
+    fetchCodeAnalysis,
     advanceDay,
     refreshData,
     markNotificationRead,
     clearError,
     setIsPolling,
     setData,
+    setCodeAnalysis,
 
     // Computed - data is ready only if we have goals
     hasData: dataStatus === 'ready' && !!data && !!agentState?.goals?.length,
     isWaitingForData: isPolling && dataStatus !== 'ready',
-    unreadCount: notifications.filter(n => !n.read).length
+    unreadCount: notifications.filter(n => !n.read).length,
+    hasCodeAnalysis: !!codeAnalysis?.submissions?.length
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

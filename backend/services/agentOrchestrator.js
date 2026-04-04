@@ -12,11 +12,11 @@
  * Flow: Extract → Diagnose → Set Goals → Plan → Monitor → Adapt → Repeat
  */
 
-const agents = require('../agents');
-const memory = require('./memoryStore');
-const logger = require('./agentLogger');
-const confidenceTracker = require('./confidenceTracker');
-const { generateNextAction, generateAlerts, generateStrategyEvolution } = require('./nextActionGenerator');
+import * as agents from '../agents/index.js';
+import * as memory from './memoryStore.js';
+import * as logger from './agentLogger.js';
+import * as confidenceTracker from './confidenceTracker.js';
+import { generateNextAction, generateAlerts, generateStrategyEvolution } from './nextActionGenerator.js';
 
 // Agent loop stages
 const STAGES = {
@@ -618,7 +618,7 @@ function getConfidenceHistory(userId, topic = null) {
   return confidenceTracker.getHistory(userId, { topic });
 }
 
-module.exports = {
+export {
   STAGES,
   STAGE_DESCRIPTIONS,
   runFullLoop,

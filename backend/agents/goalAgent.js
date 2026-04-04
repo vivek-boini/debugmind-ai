@@ -163,4 +163,4 @@ function updateGoalProgress(goal, newScore) {
   return updated;
 }
 
-module.exports = { setGoals, updateGoalProgress, calculateTargetScore };
+export { setGoals, updateGoalProgress, calculateTargetScore };

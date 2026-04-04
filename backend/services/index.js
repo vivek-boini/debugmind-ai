@@ -3,16 +3,20 @@
  * Central export point for all service modules
  */
 
-const orchestrator = require('./agentOrchestrator');
-const memory = require('./memoryStore');
-const logger = require('./agentLogger');
-const confidenceTracker = require('./confidenceTracker');
-const nextActionGenerator = require('./nextActionGenerator');
+import * as orchestrator from './agentOrchestrator.js';
+import * as memory from './memoryStore.js';
+import * as logger from './agentLogger.js';
+import * as confidenceTracker from './confidenceTracker.js';
+import * as nextActionGenerator from './nextActionGenerator.js';
+import * as codeAnalysisService from './codeAnalysisService.js';
+import * as llmService from './llmService.js';
 
-module.exports = {
+export {
   orchestrator,
   memory,
   logger,
   confidenceTracker,
-  nextActionGenerator
+  nextActionGenerator,
+  codeAnalysisService,
+  llmService
 };

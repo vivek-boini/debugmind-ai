@@ -295,7 +295,7 @@ function clearHistory(userId) {
   return true;
 }
 
-module.exports = {
+export {
   recordConfidence,
   getHistory,
   calculateTrend,

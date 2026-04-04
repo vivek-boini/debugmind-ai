@@ -450,4 +450,4 @@ function adjustPlan(currentPlan, adaptation) {
   return newPlan;
 }
 
-module.exports = { createPlan, adjustPlan, getProblems, PROBLEM_DATABASE };
+export { createPlan, adjustPlan, getProblems, PROBLEM_DATABASE };

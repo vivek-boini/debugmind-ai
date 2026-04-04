@@ -3,13 +3,13 @@
  * Central export point for all agent modules
  */
 
-const { diagnose, classifyProblem, TOPIC_KEYWORDS } = require('./diagnosisAgent');
-const { setGoals, updateGoalProgress, calculateTargetScore } = require('./goalAgent');
-const { createPlan, adjustPlan, getProblems, PROBLEM_DATABASE } = require('./planningAgent');
-const { monitor, calculateSuccessRate, detectTrend } = require('./monitoringAgent');
-const { adapt, getActionFromSuccessRate, STRATEGY_MODIFICATIONS } = require('./adaptationAgent');
+import { diagnose, classifyProblem, TOPIC_KEYWORDS } from './diagnosisAgent.js';
+import { setGoals, updateGoalProgress, calculateTargetScore } from './goalAgent.js';
+import { createPlan, adjustPlan, getProblems, PROBLEM_DATABASE } from './planningAgent.js';
+import { monitor, calculateSuccessRate, detectTrend } from './monitoringAgent.js';
+import { adapt, getActionFromSuccessRate, STRATEGY_MODIFICATIONS } from './adaptationAgent.js';
 
-module.exports = {
+export {
   // Diagnosis Agent
   diagnose,
   classifyProblem,
