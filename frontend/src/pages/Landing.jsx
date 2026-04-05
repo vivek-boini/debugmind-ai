@@ -1,18 +1,20 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import {
   ArrowRight, RotateCcw, BrainCircuit, Calendar, Bell, MessageSquare,
-  ExternalLink, Zap, Target, TrendingUp, CheckCircle2, ChevronRight
+  Zap, Target, TrendingUp, ChevronRight,
+  LogIn, UserPlus, Loader2
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { Modal } from '../components/Modal';
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
 
 export default function Landing() {
   const navigate = useNavigate();
-  const { saveUser, analyze, loading } = useApp();
+  const { isAuthenticated } = useApp();
   const [url, setUrl] = useState('');
-  const [showRedirectModal, setShowRedirectModal] = useState(false);
-  const [extractedUsername, setExtractedUsername] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   // Extract and sanitize username from LeetCode URL or input
   const extractUsername = (input) => {
@@ -45,35 +47,36 @@ export default function Landing() {
   const handleStartAnalysis = async () => {
     const username = extractUsername(url);
     if (!username) {
-      console.warn('[Landing] No valid username extracted from:', url);
+      setError('Please enter a valid LeetCode username or URL');
       return;
     }
 
-    console.log('[Landing] Starting analysis for:', username);
-    setExtractedUsername(username);
-    saveUser(username);
-    setShowRedirectModal(true);
-  };
+    setLoading(true);
+    setError('');
+    console.log('[Landing] Checking user:', username);
 
-  const handleConfirmRedirect = () => {
-    // Redirect to user's LeetCode profile page (not submissions which 404s)
-    const profileUrl = `https://leetcode.com/u/${extractedUsername}/`;
-    console.log('[Landing] Redirecting to:', profileUrl);
-    window.open(profileUrl, '_blank');
-    setShowRedirectModal(false);
-    // Navigate to dashboard where polling will wait for data
-    navigate('/dashboard');
-  };
-
-  const handleSkipExtension = async () => {
-    // Try direct API analysis (for demo/testing)
-    setShowRedirectModal(false);
     try {
-      await analyze(`https://leetcode.com/u/${extractedUsername}`);
-      navigate('/dashboard');
-    } catch (e) {
-      // Navigate anyway - polling will handle it
-      navigate('/dashboard');
+      // Call backend to check if user exists
+      const res = await fetch(`${API_BASE_URL}/check-user/${username}`);
+      const data = await res.json();
+      
+      console.log('[Landing] Check user response:', data);
+
+      if (data.exists) {
+        // User exists - redirect to login with username
+        console.log('[Landing] User exists, redirecting to login');
+        navigate('/login', { state: { leetcodeUsername: username, hasData: data.hasData } });
+      } else {
+        // User doesn't exist - redirect to signup with username
+        console.log('[Landing] New user, redirecting to signup');
+        navigate('/signup', { state: { leetcodeUsername: username } });
+      }
+    } catch (err) {
+      console.error('[Landing] Error checking user:', err);
+      // On error, default to signup flow
+      navigate('/signup', { state: { leetcodeUsername: username } });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -89,14 +92,36 @@ export default function Landing() {
             </div>
             <span className="text-xl font-bold">DebugMind AI</span>
           </div>
-          <a
-            href="https://github.com"
-            target="_blank"
-            rel="noreferrer"
-            className="text-sm text-slate-400 hover:text-white transition-colors flex items-center gap-2"
-          >
-            View on GitHub <ExternalLink size={14} />
-          </a>
+          
+          {/* Auth Buttons */}
+          <div className="flex items-center gap-3">
+            {isAuthenticated ? (
+              <Link
+                to="/dashboard"
+                className="btn-primary flex items-center gap-2 text-sm py-2 px-4"
+              >
+                Dashboard
+                <ArrowRight size={16} />
+              </Link>
+            ) : (
+              <>
+                <Link
+                  to="/login"
+                  className="text-sm text-slate-400 hover:text-white transition-colors flex items-center gap-2 py-2 px-4"
+                >
+                  <LogIn size={16} />
+                  Login
+                </Link>
+                <Link
+                  to="/signup"
+                  className="btn-primary flex items-center gap-2 text-sm py-2 px-4"
+                >
+                  <UserPlus size={16} />
+                  Sign Up
+                </Link>
+              </>
+            )}
+          </div>
         </header>
 
         {/* Main Hero */}
@@ -116,15 +141,16 @@ export default function Landing() {
 
           {/* Input Section */}
           <div className="max-w-2xl mx-auto">
-            <div className="bg-dark-800 border border-slate-700 rounded-2xl p-2 shadow-xl shadow-black/20">
+            <div className={`bg-dark-800 border rounded-2xl p-2 shadow-xl shadow-black/20 ${error ? 'border-red-500/50' : 'border-slate-700'}`}>
               <div className="flex flex-col md:flex-row gap-2">
                 <input
                   type="text"
                   value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleStartAnalysis()}
+                  onChange={(e) => { setUrl(e.target.value); setError(''); }}
+                  onKeyDown={(e) => e.key === 'Enter' && !loading && handleStartAnalysis()}
                   placeholder="Enter LeetCode username or profile URL..."
                   className="flex-1 bg-transparent border-none focus:ring-0 p-4 text-lg placeholder:text-slate-600"
+                  disabled={loading}
                 />
                 <button
                   onClick={handleStartAnalysis}
@@ -133,21 +159,25 @@ export default function Landing() {
                 >
                   {loading ? (
                     <>
-                      <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      Processing...
+                      <Loader2 size={20} className="animate-spin" />
+                      Checking...
                     </>
                   ) : (
                     <>
-                      Start Analysis
+                      Get Started
                       <ArrowRight size={20} />
                     </>
                   )}
                 </button>
               </div>
             </div>
-            <p className="text-xs text-slate-600 mt-3">
-              Example: leetcode.com/u/username or just "username"
-            </p>
+            {error ? (
+              <p className="text-xs text-red-400 mt-3">{error}</p>
+            ) : (
+              <p className="text-xs text-slate-600 mt-3">
+                Example: leetcode.com/u/username or just "username"
+              </p>
+            )}
           </div>
         </div>
 
@@ -246,58 +276,6 @@ export default function Landing() {
           <p>Built with AI for better coding • DebugMind AI 2026</p>
         </footer>
       </div>
-
-      {/* Redirect Modal */}
-      <Modal
-        isOpen={showRedirectModal}
-        onClose={() => setShowRedirectModal(false)}
-        title="Ready to Extract Data"
-        size="md"
-      >
-        <div className="space-y-6">
-          <div className="bg-accent-purple/10 border border-accent-purple/20 rounded-xl p-4">
-            <p className="text-sm">
-              Logged in as: <span className="font-bold text-accent-purple">{extractedUsername}</span>
-            </p>
-          </div>
-
-          <div className="space-y-4">
-            <p className="text-slate-300">
-              You will be redirected to LeetCode. Please:
-            </p>
-            <ol className="space-y-3 text-sm text-slate-400">
-              <li className="flex items-start gap-3">
-                <CheckCircle2 size={18} className="text-accent-teal shrink-0 mt-0.5" />
-                <span>Open the <strong className="text-white">DebugMind Chrome Extension</strong></span>
-              </li>
-              <li className="flex items-start gap-3">
-                <CheckCircle2 size={18} className="text-accent-teal shrink-0 mt-0.5" />
-                <span>Click <strong className="text-white">"Extract AI Data"</strong> button</span>
-              </li>
-              <li className="flex items-start gap-3">
-                <CheckCircle2 size={18} className="text-accent-teal shrink-0 mt-0.5" />
-                <span>Return here to view your personalized insights</span>
-              </li>
-            </ol>
-          </div>
-
-          <div className="flex flex-col gap-3 pt-4">
-            <button
-              onClick={handleConfirmRedirect}
-              className="btn-primary flex items-center justify-center gap-2"
-            >
-              Open LeetCode
-              <ExternalLink size={18} />
-            </button>
-            <button
-              onClick={handleSkipExtension}
-              className="text-sm text-slate-500 hover:text-slate-300 transition-colors"
-            >
-              Skip (use demo data)
-            </button>
-          </div>
-        </div>
-      </Modal>
     </div>
   );
 }

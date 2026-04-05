@@ -220,6 +220,16 @@ async function runFullLoop(userId, submissions) {
     results.next_action = generateNextAction(updatedState);
     results.alerts = generateAlerts(updatedState);
 
+    // CRITICAL: Include actual agent outputs for DB persistence
+    // These are needed by persistExtractData to save to MongoDB
+    results.diagnosis = updatedState.diagnosis;
+    results.goals = updatedState.goals;
+    results.plan = updatedState.current_plan;
+    results.monitoring = updatedState.current_progress;
+    results.adaptation = updatedState.current_adaptation;
+
+    console.log(`[Orchestrator] Full loop complete - Goals: ${results.goals?.length || 0}, Plan days: ${results.plan?.plan?.length || 0}`);
+
   } catch (error) {
     results.errors.push({
       stage: memory.getState(userId).agent_loop.current_stage,
@@ -367,6 +377,15 @@ async function runIncrementalUpdate(userId, newSubmissions) {
     results.next_action = generateNextAction(finalState);
     results.alerts = generateAlerts(finalState);
     results.strategy_evolution = generateStrategyEvolution(finalState.adaptations);
+
+    // CRITICAL: Include actual agent outputs for DB persistence
+    results.diagnosis = finalState.diagnosis;
+    results.goals = finalState.goals;
+    results.plan = finalState.current_plan;
+    results.monitoring = finalState.current_progress;
+    results.adaptation = finalState.current_adaptation;
+
+    console.log(`[Orchestrator] Incremental update complete - Goals: ${results.goals?.length || 0}`);
 
   } catch (error) {
     results.errors.push({

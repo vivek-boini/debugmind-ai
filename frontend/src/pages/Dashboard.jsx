@@ -1,8 +1,8 @@
-import React, { useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
-  RefreshCw, BrainCircuit, ArrowRight, AlertTriangle, CheckCircle2, 
-  Zap, ListOrdered, ChevronRight
+  RefreshCw, BrainCircuit, AlertTriangle, CheckCircle2, 
+  Zap, ListOrdered, ChevronRight, Loader2
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { WaitingForData, EmptyState } from '../components/Loader';
@@ -10,6 +10,46 @@ import {
   Card, Badge, ProgressBar, SmartAlerts, NextActionCard, StrategyEvolution,
   DecisionTimeline, AgentLoopIndicator, ProgressTracker, AdaptationPanel
 } from '../components/ui';
+
+// Floating Extract Button Component
+const FloatingExtractButton = ({ onClick, isExtracting, success }) => {
+  return (
+    <button
+      onClick={onClick}
+      disabled={isExtracting}
+      className={`
+        fixed bottom-6 right-6 z-50
+        flex items-center gap-2 px-5 py-3 rounded-full
+        font-medium text-sm shadow-2xl
+        transition-all duration-300 transform hover:scale-105
+        ${success 
+          ? 'bg-green-500 text-white shadow-green-500/30' 
+          : isExtracting 
+            ? 'bg-slate-700 text-slate-300 cursor-wait'
+            : 'bg-gradient-to-r from-accent-purple to-accent-teal text-white shadow-accent-purple/30 hover:shadow-accent-purple/50'
+        }
+        disabled:opacity-70 disabled:cursor-not-allowed disabled:transform-none
+      `}
+    >
+      {success ? (
+        <>
+          <CheckCircle2 size={18} />
+          Updated ✓
+        </>
+      ) : isExtracting ? (
+        <>
+          <Loader2 size={18} className="animate-spin" />
+          Extracting...
+        </>
+      ) : (
+        <>
+          <Zap size={18} />
+          Extract Latest Data
+        </>
+      )}
+    </button>
+  );
+};
 
 // Enhanced Alerts Component with severity
 const EnhancedAlerts = ({ alerts }) => {
@@ -147,7 +187,12 @@ const DynamicSummary = ({ data, agentState }) => {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { user, data, agentState, hasData, isWaitingForData, refreshData, isPolling, setIsPolling, dataStatus } = useApp();
+  const { 
+    user, data, agentState, hasData, isWaitingForData, refreshData, 
+    isPolling, setIsPolling, dataStatus, extractLatestData, loading 
+  } = useApp();
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractSuccess, setExtractSuccess] = useState(false);
 
   // Debug logging
   useEffect(() => {
@@ -162,34 +207,79 @@ export default function Dashboard() {
     }
   }, [user, navigate]);
 
-  // Start polling when dashboard loads if user exists
-  useEffect(() => {
-    if (user && !isPolling && !hasData) {
-      console.log('[Dashboard] Starting polling for user:', user);
+  // Handle extract latest data
+  const handleExtractLatest = async () => {
+    setIsExtracting(true);
+    setExtractSuccess(false);
+    try {
+      // Open LeetCode in new tab
+      const profileUrl = `https://leetcode.com/u/${user}/`;
+      window.open(profileUrl, '_blank');
+      
+      // Start polling for new data
       setIsPolling(true);
+      await extractLatestData();
+      
+      // Show success state briefly
+      setExtractSuccess(true);
+      setTimeout(() => setExtractSuccess(false), 3000);
+    } catch (err) {
+      console.error('[Dashboard] Extract failed:', err);
+    } finally {
+      setIsExtracting(false);
     }
-  }, [user, isPolling, hasData, setIsPolling]);
+  };
 
-  // Show waiting state if polling but no data yet
-  if (isWaitingForData || (isPolling && !hasData && dataStatus !== 'ready')) {
+  // Show waiting state ONLY if actively polling
+  if (isWaitingForData && isPolling) {
     console.log('[Dashboard] Showing waiting state');
-    return <WaitingForData />;
+    return (
+      <>
+        <WaitingForData />
+        <FloatingExtractButton 
+          onClick={handleExtractLatest}
+          isExtracting={isExtracting}
+          success={extractSuccess}
+        />
+      </>
+    );
   }
 
-  // Show empty state if not polling and no data
+  // Show empty state with extract button - don't force extraction
   if (!hasData) {
     console.log('[Dashboard] Showing empty state - no data');
     return (
-      <EmptyState
-        title="No Analysis Yet"
-        message="Start from the homepage to analyze your LeetCode profile and get personalized insights."
-        icon={BrainCircuit}
-        action={
-          <Link to="/" className="btn-primary inline-flex items-center gap-2">
-            Go to Homepage <ArrowRight size={18} />
-          </Link>
-        }
-      />
+      <>
+        <EmptyState
+          title="Welcome to DebugMind AI"
+          message="Click 'Extract Latest Data' to analyze your LeetCode profile and get personalized AI insights."
+          icon={BrainCircuit}
+          action={
+            <button 
+              onClick={handleExtractLatest}
+              disabled={isExtracting}
+              className="btn-primary inline-flex items-center gap-2"
+            >
+              {isExtracting ? (
+                <>
+                  <Loader2 size={18} className="animate-spin" />
+                  Extracting...
+                </>
+              ) : (
+                <>
+                  <Zap size={18} />
+                  Extract Latest Data
+                </>
+              )}
+            </button>
+          }
+        />
+        <FloatingExtractButton 
+          onClick={handleExtractLatest}
+          isExtracting={isExtracting}
+          success={extractSuccess}
+        />
+      </>
     );
   }
 
@@ -260,6 +350,13 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      {/* Floating Extract Button */}
+      <FloatingExtractButton 
+        onClick={handleExtractLatest}
+        isExtracting={isExtracting}
+        success={extractSuccess}
+      />
     </div>
   );
 }

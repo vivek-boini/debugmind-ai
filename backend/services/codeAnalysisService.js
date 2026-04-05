@@ -1,21 +1,22 @@
 /**
  * Code Analysis Service
- * Uses NVIDIA LLM API with safe fallback
+ * Uses NVIDIA LLM API - NO fallback logic
  * 
  * Features:
- * - Primary: LLM-enhanced insights (ALWAYS used when API succeeds)
- * - Secondary: Agent-based rule analysis (fallback ONLY if API fails)
- * - NO strict JSON parsing - LLM text is always used
- * - System NEVER fails due to formatting issues
+ * - LLM-only analysis (no rule-based fallback)
+ * - Returns error if LLM fails (no silent fallback)
+ * - Persists analysis to MongoDB with source: "llm"
+ * - All analysis must come from LLM
  */
 
 import { generateLLMInsights, tryParseJSON, isAvailable } from './llmService.js';
+import * as dbService from './dbService.js';
 
 /**
- * Analyze submissions using LLM - ALWAYS uses LLM when available
+ * Analyze submissions using LLM ONLY
  * @param {string} username - The LeetCode username
  * @param {Array} submissions - Array of submission objects
- * @returns {Promise<Object>} - Analysis results with llmInsights
+ * @returns {Promise<Object>} - Analysis results with llmInsights or error
  */
 async function analyzeSubmissions(username, submissions) {
   if (!submissions || submissions.length === 0) {
@@ -23,13 +24,14 @@ async function analyzeSubmissions(username, submissions) {
       username,
       submissions: [],
       llmInsights: null,
-      analysisSource: 'none'
+      analysisSource: 'none',
+      error: false
     };
   }
 
-  console.log(`[CodeAnalysis] Analyzing ${submissions.length} submissions for ${username}`);
+  console.log(`[CodeAnalysis] Analyzing ${submissions.length} submissions for ${username} (LLM-only)`);
 
-  // Prepare submissions data
+  // Prepare submissions data for LLM
   const submissionsData = submissions.map(sub => ({
     submissionId: sub.id,
     title: sub.title,
@@ -41,105 +43,145 @@ async function analyzeSubmissions(username, submissions) {
     memory: sub.memory
   }));
 
-  // Build base analysis from rule-based system
-  const baseAnalysis = {
-    username,
-    analyzedAt: new Date().toISOString(),
-    submissions: generateRuleBasedAnalysis(submissionsData),
-    llmInsights: null,
-    structured: null,
-    analysisSource: 'rule-based'
-  };
+  // Check if LLM is available
+  if (!isAvailable()) {
+    console.log('[CodeAnalysis] LLM not available - API key not configured');
+    return {
+      username,
+      analyzedAt: new Date().toISOString(),
+      submissions: [],
+      llmInsights: null,
+      structured: null,
+      analysisSource: 'none',
+      error: true,
+      message: 'Analysis failed. LLM API key not configured. Please try again later.'
+    };
+  }
 
-  // Try LLM enhancement
-  if (isAvailable()) {
-    const prompt = `
+  // Build LLM prompt
+  const prompt = `
 You are an expert coding mentor.
 
-Analyze the following LeetCode submission data and provide:
+Analyze the following LeetCode submission data and provide a detailed analysis in JSON format:
 
-1. Weak topics identified
-2. Common mistakes made
-3. Suggested improvements
-4. Key insights for improvement
+{
+  "submissions": [
+    {
+      "submissionId": "...",
+      "title": "...",
+      "score": 1-10,
+      "timeComplexity": "O(...)",
+      "spaceComplexity": "O(...)",
+      "mistakes": ["..."],
+      "improvements": ["..."],
+      "patterns": ["..."]
+    }
+  ],
+  "weakTopics": ["..."],
+  "commonMistakes": ["..."],
+  "suggestedImprovements": ["..."],
+  "keyInsights": ["..."]
+}
 
-Be concise and structured.
+For each submission:
+1. Score (1-10) based on code quality, efficiency, and correctness
+2. Time and space complexity analysis
+3. Specific mistakes identified
+4. Concrete improvement suggestions
+5. Patterns or techniques that could help
 
 Data:
 ${JSON.stringify(submissionsData, null, 2)}
 `;
 
-    const llmResult = await generateLLMInsights(prompt);
+  const llmResult = await generateLLMInsights(prompt);
 
-    // ALWAYS use LLM output if API call succeeded
-    if (llmResult.success && llmResult.text) {
-      baseAnalysis.llmInsights = llmResult.text;
-      baseAnalysis.analysisSource = 'llm';
-      console.log(`[CodeAnalysis] LLM insights applied successfully`);
-
-      // Optional: Try to extract structured data (non-blocking)
-      const parsed = tryParseJSON(llmResult.text);
-      if (parsed) {
-        baseAnalysis.structured = parsed;
-      }
-    } else {
-      // Fallback ONLY if API call failed
-      baseAnalysis.llmInsights = 'Using agent-based analysis (LLM unavailable)';
-      console.log(`[CodeAnalysis] LLM failed, using rule-based: ${llmResult.error}`);
-    }
-  } else {
-    baseAnalysis.llmInsights = 'Using agent-based analysis (API key not configured)';
-    console.log('[CodeAnalysis] LLM not available, using rule-based analysis');
+  // LLM MUST succeed - no fallback
+  if (!llmResult.success || !llmResult.text) {
+    console.log(`[CodeAnalysis] LLM failed: ${llmResult.error}`);
+    return {
+      username,
+      analyzedAt: new Date().toISOString(),
+      submissions: [],
+      llmInsights: null,
+      structured: null,
+      analysisSource: 'none',
+      error: true,
+      message: 'Analysis failed. LLM service unavailable. Please try again.'
+    };
   }
+
+  console.log(`[CodeAnalysis] LLM analysis successful`);
+
+  // Parse LLM response
+  const parsed = tryParseJSON(llmResult.text);
+  
+  // Build analysis results from LLM response
+  const analysisResults = parsed?.submissions || submissionsData.map(sub => ({
+    submissionId: sub.submissionId,
+    title: sub.title,
+    titleSlug: sub.titleSlug,
+    lang: sub.lang,
+    userCode: sub.code,
+    status: sub.status,
+    score: 5, // Will be overwritten by LLM if available
+    timeComplexity: 'Unknown',
+    spaceComplexity: 'Unknown',
+    mistakes: [],
+    improvements: [],
+    patterns: []
+  }));
+
+  const baseAnalysis = {
+    username,
+    analyzedAt: new Date().toISOString(),
+    submissions: analysisResults,
+    llmInsights: llmResult.text,
+    structured: parsed,
+    analysisSource: 'llm', // Always LLM
+    error: false
+  };
+
+  // Persist LLM analysis to MongoDB
+  await persistAnalysisToDb(username, analysisResults, 'llm');
 
   return baseAnalysis;
 }
 
 /**
- * Generate rule-based analysis (fallback when LLM unavailable)
- * @param {Array} submissionsData - Prepared submission data
- * @returns {Array} - Rule-based analysis results
+ * Persist LLM analysis results to MongoDB
+ * UPSERT using userId + titleSlug
+ * Always includes source: "llm"
  */
-function generateRuleBasedAnalysis(submissionsData) {
-  return submissionsData.map(sub => {
-    const isAccepted = sub.status === 'Accepted';
-    const hasCode = sub.code && sub.code.length > 0;
-    const codeLength = hasCode ? sub.code.length : 0;
+async function persistAnalysisToDb(username, analysisResults, source = 'llm') {
+  try {
+    const promises = analysisResults.map(async (analysis) => {
+      if (!analysis.title) return null;
+      
+      // Generate titleSlug from title if not present
+      const titleSlug = analysis.titleSlug || 
+        analysis.title.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      
+      const analysisData = {
+        source: source, // Always "llm" - no rule-based fallback
+        finalScore: analysis.score || 5,
+        timeComplexity: analysis.timeComplexity || 'Unknown',
+        spaceComplexity: analysis.spaceComplexity || 'Unknown',
+        mistakes: analysis.mistakes || analysis.whatsWrong || [],
+        improvements: analysis.improvements || analysis.howToImprove || [],
+        patterns: analysis.patterns || analysis.whatsLacking || []
+      };
+      
+      return dbService.upsertSubmissionAnalysis(username, titleSlug, analysisData);
+    });
     
-    let score = isAccepted ? 7 : 3;
-    if (isAccepted && codeLength < 500) score = 8;
-    if (isAccepted && codeLength > 2000) score = 6;
-    
-    const whatsLacking = [];
-    const howToImprove = [];
-    
-    if (hasCode) {
-      if (!sub.code.includes('//') && !sub.code.includes('#') && !sub.code.includes('/*')) {
-        whatsLacking.push('No comments in code');
-        howToImprove.push('Add comments to explain complex logic');
-      }
-      if (codeLength > 1500) {
-        whatsLacking.push('Code may be too verbose');
-        howToImprove.push('Consider refactoring into smaller functions');
-      }
-    }
-    
-    return {
-      submissionId: sub.submissionId,
-      title: sub.title,
-      lang: sub.lang,
-      userCode: sub.code,
-      status: sub.status,
-      verdict: isAccepted ? 'Solution accepted - review for optimizations' : 'Solution needs debugging',
-      score,
-      timeComplexity: 'See LLM insights',
-      spaceComplexity: 'See LLM insights',
-      isOptimal: false,
-      whatsWrong: isAccepted ? [] : ['Solution did not pass all test cases'],
-      whatsLacking,
-      howToImprove
-    };
-  });
+    const results = await Promise.all(promises);
+    const savedCount = results.filter(r => r !== null).length;
+    console.log(`[DB] ✓ Saved LLM analysis for ${savedCount} submissions`);
+  } catch (error) {
+    console.error('[DB] Failed to persist LLM analysis:', error.message);
+    // Non-blocking: don't throw, just log
+  }
 }
 
 /**

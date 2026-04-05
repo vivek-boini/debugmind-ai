@@ -147,13 +147,36 @@ function groupSubmissionsByProblem(submissions) {
     return acc;
   }, {});
 
-  // Convert to array and sort by number of submissions (most first)
-  const result = Object.values(groups).sort((a, b) => b.submissions.length - a.submissions.length);
+  // Issue 3 fix: Sort by latestSubmissionTime DESC (newest first)
+  // Compute latestSubmissionTime = max(submissions[].timestamp) for each problem
+  const result = Object.values(groups).map(problem => {
+    // Find the latest timestamp among all submissions for this problem
+    let latestTime = 0;
+    problem.submissions.forEach(sub => {
+      const ts = sub.timestamp ? 
+        (typeof sub.timestamp === 'number' ? sub.timestamp * 1000 : new Date(sub.timestamp).getTime()) : 
+        0;
+      if (ts > latestTime) latestTime = ts;
+    });
+    problem.latestSubmissionTime = latestTime;
+    return problem;
+  });
+
+  // Sort by latestSubmissionTime DESC (newest problems first)
+  result.sort((a, b) => b.latestSubmissionTime - a.latestSubmissionTime);
   
-  // IMPORTANT: Reverse submissions to chronological order (oldest → latest)
-  // LeetCode API returns latest first, but we want oldest first for timeline
+  // IMPORTANT: Keep submissions in chronological order within each problem (oldest → latest)
+  // This is useful for showing progression timeline
   result.forEach(problem => {
-    problem.submissions = [...problem.submissions].reverse();
+    problem.submissions.sort((a, b) => {
+      const tsA = a.timestamp ? 
+        (typeof a.timestamp === 'number' ? a.timestamp : new Date(a.timestamp).getTime() / 1000) : 
+        0;
+      const tsB = b.timestamp ? 
+        (typeof b.timestamp === 'number' ? b.timestamp : new Date(b.timestamp).getTime() / 1000) : 
+        0;
+      return tsA - tsB; // oldest first within problem
+    });
   });
   
   return result;

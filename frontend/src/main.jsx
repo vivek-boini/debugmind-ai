@@ -4,6 +4,8 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { AppProvider } from './context/AppContext';
 import App from './App';
 import Landing from './pages/Landing';
+import Login from './pages/Login';
+import Signup from './pages/Signup';
 import Dashboard from './pages/Dashboard';
 import CodeAnalysis from './pages/CodeAnalysis';
 import Goals from './pages/Goals';
@@ -20,6 +22,10 @@ createRoot(document.getElementById('root')).render(
         <Routes>
           {/* Landing page - no layout */}
           <Route path="/" element={<Landing />} />
+          
+          {/* Auth pages - no layout */}
+          <Route path="/login" element={<Login />} />
+          <Route path="/signup" element={<Signup />} />
 
           {/* App layout with sidebar/navbar */}
           <Route element={<App />}>

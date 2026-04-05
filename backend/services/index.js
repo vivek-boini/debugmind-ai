@@ -11,6 +11,10 @@ import * as nextActionGenerator from './nextActionGenerator.js';
 import * as codeAnalysisService from './codeAnalysisService.js';
 import * as llmService from './llmService.js';
 
+// MongoDB integration services
+import * as dbService from './dbService.js';
+import * as authService from './authService.js';
+
 export {
   orchestrator,
   memory,
@@ -18,5 +22,7 @@ export {
   confidenceTracker,
   nextActionGenerator,
   codeAnalysisService,
-  llmService
+  llmService,
+  dbService,
+  authService
 };

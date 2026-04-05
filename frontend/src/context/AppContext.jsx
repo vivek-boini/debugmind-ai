@@ -11,6 +11,16 @@ export const useApp = () => {
 };
 
 export function AppProvider({ children }) {
+  // Auth state
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('debugmind_token') || null);
+  const [authUser, setAuthUser] = useState(() => {
+    const stored = localStorage.getItem('debugmind_auth_user');
+    return stored ? JSON.parse(stored) : null;
+  });
+  const [authError, setAuthError] = useState(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(() => !!localStorage.getItem('debugmind_token'));
+
+  // Legacy user state (for backward compatibility)
   const [user, setUser] = useState(() => localStorage.getItem('debugmind_user') || null);
   const [data, setData] = useState(null);
   const [agentState, setAgentState] = useState(null);
@@ -26,6 +36,240 @@ export function AppProvider({ children }) {
   // Use ref to track if data was found (to stop polling)
   const dataFoundRef = useRef(false);
 
+  // ============================================
+  // AUTHENTICATION FUNCTIONS
+  // ============================================
+
+  // Login with email and password
+  const login = useCallback(async (email, password) => {
+    setAuthError(null);
+    setLoading(true);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || data.error) {
+        const errorMsg = data.message || data.error || 'Login failed';
+        setAuthError(errorMsg);
+        return { success: false, error: errorMsg };
+      }
+
+      // Store auth data
+      localStorage.setItem('debugmind_token', data.token);
+      localStorage.setItem('debugmind_auth_user', JSON.stringify(data.user));
+      localStorage.setItem('debugmind_user', data.user.leetcodeUsername || data.user.userId);
+      
+      setAuthToken(data.token);
+      setAuthUser(data.user);
+      setIsAuthenticated(true);
+      setUser(data.user.leetcodeUsername || data.user.userId);
+
+      // Try to load user's existing data from DB
+      // This also hydrates the backend memory store
+      const loadedData = await loadUserDataFromDB(data.user.userId);
+      
+      // If DB had data, also fetch the enhanced agent state
+      // (backend memory store is now hydrated, so this returns full data)
+      if (loadedData) {
+        await fetchAgentState(data.user.userId);
+      }
+
+      console.log('[AppContext] Login successful:', data.user.userId);
+      return { success: true, user: data.user };
+    } catch (err) {
+      const errorMsg = 'Network error. Please try again.';
+      setAuthError(errorMsg);
+      console.error('[AppContext] Login error:', err);
+      return { success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Signup with email, password, and leetcode username
+  const signup = useCallback(async (email, password, leetcodeUsername) => {
+    setAuthError(null);
+    setLoading(true);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/signup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, leetcodeUsername })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || data.error) {
+        const errorMsg = data.message || data.error || 'Signup failed';
+        setAuthError(errorMsg);
+        return { success: false, error: errorMsg };
+      }
+
+      // Store auth data
+      localStorage.setItem('debugmind_token', data.token);
+      localStorage.setItem('debugmind_auth_user', JSON.stringify(data.user));
+      localStorage.setItem('debugmind_user', leetcodeUsername);
+      
+      setAuthToken(data.token);
+      setAuthUser(data.user);
+      setIsAuthenticated(true);
+      setUser(leetcodeUsername);
+
+      console.log('[AppContext] Signup successful:', data.user.userId);
+      return { success: true, user: data.user };
+    } catch (err) {
+      const errorMsg = 'Network error. Please try again.';
+      setAuthError(errorMsg);
+      console.error('[AppContext] Signup error:', err);
+      return { success: false, error: errorMsg };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Guest login (backward compatible)
+  const guestLogin = useCallback(async (leetcodeUsername) => {
+    setAuthError(null);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/guest-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leetcodeUsername })
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.token) {
+        localStorage.setItem('debugmind_token', data.token);
+        localStorage.setItem('debugmind_auth_user', JSON.stringify(data.user));
+        setAuthToken(data.token);
+        setAuthUser(data.user);
+      }
+
+      // Always save user for backward compatibility
+      localStorage.setItem('debugmind_user', leetcodeUsername);
+      setUser(leetcodeUsername);
+      
+      return { success: true };
+    } catch (err) {
+      console.error('[AppContext] Guest login error:', err);
+      // Still work even if guest login fails
+      localStorage.setItem('debugmind_user', leetcodeUsername);
+      setUser(leetcodeUsername);
+      return { success: true };
+    }
+  }, []);
+
+  // Load user data from database (for returning users)
+  // DB is the source of truth - cache is populated from DB
+  const loadUserDataFromDB = useCallback(async (userId) => {
+    if (!userId) return null;
+
+    try {
+      console.log('[UI] Loading user data from DB for:', userId);
+      const res = await fetch(`${API_BASE_URL}/load-user-data/${userId}`);
+      
+      if (!res.ok) {
+        console.log('[UI] No stored data for user');
+        setDataStatus('no_data');
+        return null;
+      }
+
+      const userData = await res.json();
+      
+      // hasData is based on submissions count (DB is source of truth)
+      if (!userData.hasData) {
+        console.log('[UI] User exists but no submissions in DB');
+        setDataStatus('no_data');
+        return null;
+      }
+
+      console.log('[UI] DB has data - hydrating state', {
+        submissionsCount: userData.submissionDocs?.length || 0,
+        hasAgentOutput: !!userData.agentOutput,
+        goalsCount: userData.agentOutput?.goals?.length || userData.activeGoals?.length || 0
+      });
+
+      // Set submissions count for hasData check
+      const submissionsCount = userData.submissionDocs?.length || 0;
+      
+      // Build agent state - use agentOutput if available, otherwise build minimal state
+      const agentStateData = {
+        status: 'ready',
+        submissions_count: submissionsCount, // Critical for hasData
+        goals: userData.agentOutput?.goals || userData.activeGoals || [],
+        plan: userData.agentOutput?.plan,
+        progress: userData.agentOutput?.monitoring,
+        adaptation: userData.agentOutput?.adaptation,
+        next_action: userData.agentOutput?.nextAction,
+        diagnosis: userData.agentOutput?.diagnosis
+      };
+      setAgentState(agentStateData);
+
+      // Build data object for UI components
+      const goals = agentStateData.goals || [];
+      const dataObj = {
+        user: userId,
+        weak_topics: goals.map(g => ({
+          topic: g.topic,
+          confidence: g.current_score,
+          score: g.current_score,
+          goal: `Reach ${g.target_score}% success`,
+          strategy: `Focus on ${g.topic?.toLowerCase()} patterns`,
+          evidence: [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
+        })),
+        agentic: userData.agentOutput || {},
+        submissionDocs: userData.submissionDocs || []
+      };
+      
+      setData(dataObj);
+      setDataStatus('ready');
+      dataFoundRef.current = true;
+      // Stop polling since we have data from DB
+      setIsPolling(false);
+      localStorage.setItem('debugmind_data', JSON.stringify(dataObj));
+
+      console.log('[UI] ✓ State hydrated from DB - dashboard ready');
+      return userData;
+    } catch (err) {
+      console.error('[UI] Failed to load user data:', err);
+      setDataStatus('no_data');
+      return null;
+    }
+  }, []);
+
+  // Auth logout
+  const authLogout = useCallback(() => {
+    localStorage.removeItem('debugmind_token');
+    localStorage.removeItem('debugmind_auth_user');
+    localStorage.removeItem('debugmind_user');
+    localStorage.removeItem('debugmind_data');
+    
+    setAuthToken(null);
+    setAuthUser(null);
+    setIsAuthenticated(false);
+    setUser(null);
+    setData(null);
+    setAgentState(null);
+    setIsPolling(false);
+    setDataStatus('unknown');
+    dataFoundRef.current = false;
+    
+    console.log('[AppContext] Logged out');
+  }, []);
+
+  // ============================================
+  // LEGACY FUNCTIONS (kept for backward compatibility)
+  // ============================================
+
   // Save user to localStorage (sanitize to lowercase)
   const saveUser = useCallback((username) => {
     const sanitized = username.toLowerCase().trim();
@@ -34,41 +278,47 @@ export function AppProvider({ children }) {
     setUser(sanitized);
     setDataStatus('unknown');
     dataFoundRef.current = false;
-  }, []);
+    
+    // Also do guest login in background
+    guestLogin(sanitized);
+  }, [guestLogin]);
 
-  // Logout user
+  // Legacy logout (calls authLogout)
   const logout = useCallback(() => {
-    localStorage.removeItem('debugmind_user');
-    localStorage.removeItem('debugmind_data');
-    setUser(null);
-    setData(null);
-    setAgentState(null);
-    setIsPolling(false);
-  }, []);
+    authLogout();
+  }, [authLogout]);
 
-  // Fetch agent state
+  // Fetch agent state (from in-memory store on backend)
   const fetchAgentState = useCallback(async (userId) => {
     if (!userId) return null;
 
     const sanitizedUserId = userId.toLowerCase().trim();
-    console.log('[AppContext] Fetching agent state for:', sanitizedUserId);
+    console.log('[UI] Fetching agent state for:', sanitizedUserId);
 
     try {
       const res = await fetch(`${API_BASE_URL}/agent-state/${sanitizedUserId}`);
       if (!res.ok) {
-        console.error('[AppContext] Agent state fetch failed:', res.status);
+        console.error('[UI] Agent state fetch failed:', res.status);
         return null;
       }
 
       const state = await res.json();
-      console.log('[AppContext] Agent state response:', { status: state.status, hasGoals: !!state.goals?.length });
+      console.log('[UI] Agent state response:', { 
+        status: state.status, 
+        submissions_count: state.submissions_count,
+        hasGoals: !!state.goals?.length 
+      });
 
-      // Check if data is ready
-      if (state.status === 'ready' && state.goals?.length > 0) {
-        console.log('[AppContext] Data ready! Goals:', state.goals.length);
+      // Check if data is ready (status='ready' with submissions)
+      // Accept data even if goals are empty, as long as we have submissions
+      if (state.status === 'ready' && state.submissions_count > 0) {
+        console.log('[UI] ✓ Data ready! Submissions:', state.submissions_count, 'Goals:', state.goals?.length || 0);
         setDataStatus('ready');
         setAgentState(state);
         dataFoundRef.current = true;
+        
+        // Stop polling explicitly
+        setIsPolling(false);
 
         // Build data object for hasData check
         const dataObj = {
@@ -78,7 +328,7 @@ export function AppProvider({ children }) {
             confidence: g.current_score,
             score: g.current_score,
             goal: `Reach ${g.target_score}% success`,
-            strategy: `Focus on ${g.topic.toLowerCase()} patterns`,
+            strategy: `Focus on ${g.topic?.toLowerCase()} patterns`,
             evidence: [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
           })) || [],
           recommended_problems: state.plan?.plan?.[0]?.problems || [],
@@ -105,14 +355,14 @@ export function AppProvider({ children }) {
 
         return state;
       } else if (state.status === 'no_data') {
-        console.log('[AppContext] No data yet for user:', sanitizedUserId);
+        console.log('[UI] No data yet for user:', sanitizedUserId);
         setDataStatus('no_data');
         return null;
       }
 
       return null;
     } catch (e) {
-      console.error('[AppContext] Failed to fetch agent state:', e);
+      console.error('[UI] Failed to fetch agent state:', e);
       return null;
     }
   }, []);
@@ -232,6 +482,27 @@ export function AppProvider({ children }) {
   // Clear error
   const clearError = useCallback(() => setError(null), []);
 
+  // Extract latest data (for dashboard button)
+  const extractLatestData = useCallback(async () => {
+    if (!user) return null;
+    
+    setLoading(true);
+    setDataStatus('unknown');
+    dataFoundRef.current = false;
+    
+    try {
+      // Trigger extract via analyze endpoint
+      await analyze(`https://leetcode.com/u/${user}`);
+      setIsPolling(true);
+      return { success: true };
+    } catch (err) {
+      console.error('[AppContext] Extract failed:', err);
+      return { success: false, error: err.message };
+    } finally {
+      setLoading(false);
+    }
+  }, [user, analyze]);
+
   // Load cached data on mount
   useEffect(() => {
     const cachedData = localStorage.getItem('debugmind_data');
@@ -294,7 +565,13 @@ export function AppProvider({ children }) {
   }, [user, isPolling, fetchAgentState]);
 
   const value = {
-    // State
+    // Auth State
+    authToken,
+    authUser,
+    authError,
+    isAuthenticated,
+
+    // Legacy State
     user,
     data,
     agentState,
@@ -305,7 +582,14 @@ export function AppProvider({ children }) {
     dataStatus,
     notifications,
 
-    // Actions
+    // Auth Actions
+    login,
+    signup,
+    guestLogin,
+    authLogout,
+    loadUserDataFromDB,
+
+    // Legacy Actions
     saveUser,
     logout,
     analyze,
@@ -318,9 +602,10 @@ export function AppProvider({ children }) {
     setIsPolling,
     setData,
     setCodeAnalysis,
+    extractLatestData,
 
-    // Computed - data is ready only if we have goals
-    hasData: dataStatus === 'ready' && !!data && !!agentState?.goals?.length,
+    // Computed - data is ready if we have data/agentState (goals optional)
+    hasData: dataStatus === 'ready' && !!data && !!agentState?.submissions_count,
     isWaitingForData: isPolling && dataStatus !== 'ready',
     unreadCount: notifications.filter(n => !n.read).length,
     hasCodeAnalysis: !!codeAnalysis?.submissions?.length

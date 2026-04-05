@@ -8,8 +8,19 @@ const app = express();
 const port = process.env.PORT || 4000;
 
 // Import agent system
-import { orchestrator, memory, logger, codeAnalysisService, llmService } from './services/index.js';
+import { orchestrator, memory, logger, codeAnalysisService, llmService, dbService, authService } from './services/index.js';
 import * as agents from './agents/index.js';
+
+// Initialize MongoDB connection (non-blocking)
+dbService.initialize().then(connected => {
+  if (connected) {
+    console.log('[Server] MongoDB connected - persistence enabled');
+  } else {
+    console.log('[Server] Running without MongoDB - memory-only mode');
+  }
+}).catch(err => {
+  console.warn('[Server] MongoDB init error (continuing without DB):', err.message);
+});
 
 // ============================================
 // MIDDLEWARE
@@ -111,6 +122,13 @@ function getRecommendedProblems(state) {
 /**
  * POST /extract
  * Receives data from Chrome Extension and triggers agent loop
+ * 
+ * MongoDB Integration:
+ * - Creates a new Session record (append-only)
+ * - Stores agent outputs after pipeline completes
+ * - Updates submissions history
+ * - Creates progress snapshot
+ * - All DB operations are non-blocking (background)
  */
 app.post('/extract', async (req, res) => {
   const { username, submissions } = req.body || {};
@@ -135,19 +153,47 @@ app.post('/extract', async (req, res) => {
   console.log(`[Extract] Received data for user: ${sanitizedUsername} (original: ${username})`);
   console.log(`[Extract] Processing ${submissions.length} submissions`);
 
+  // Create session in MongoDB (non-blocking start)
+  let sessionId = null;
+  const sessionPromise = dbService.createSession(sanitizedUsername, submissions, {
+    source: 'chrome-extension',
+    extractionTimestamp: new Date()
+  }).then(session => {
+    if (session) {
+      sessionId = session.sessionId;
+      console.log(`[Extract] Session created: ${sessionId}`);
+    }
+    return session;
+  }).catch(err => {
+    console.warn('[Extract] Session creation failed (continuing):', err.message);
+    return null;
+  });
+
   try {
+    // Run agent loop (this updates userCache - existing behavior)
     const loopResult = await orchestrator.runFullLoop(sanitizedUsername, submissions);
 
     console.log(`[Extract] Agent loop completed for: ${sanitizedUsername}`);
     console.log(`[Extract] Goals: ${loopResult.goals?.length || 0}, Plan days: ${loopResult.plan?.plan?.length || 0}`);
     
-    // console code 
-    // console.log('[Extract] Raw submissions:', JSON.stringify(submissions, null, 2));
-    // Or just the code per submission:
-    // submissions.forEach((sub, i) => {
-    //   console.log(`\n--- Submission ${i + 1}: ${sub.title} (${sub.lang}) ---`);
-    //   console.log(sub.code);
-    // });
+    // Wait for session to be created (if DB is available)
+    const session = await sessionPromise;
+    
+    // Persist all data to MongoDB in background (NON-BLOCKING)
+    // This includes: submissions, agent outputs, goals, progress, actions
+    if (session) {
+      dbService.persistExtractData(sanitizedUsername, submissions, loopResult, session.sessionId)
+        .then(result => {
+          if (result) {
+            console.log(`[Extract] Data persistence initiated for session: ${result.sessionId}`);
+          }
+        })
+        .catch(err => {
+          console.error('[Extract] Background persistence failed:', err.message);
+        });
+    }
+
+    // Response format unchanged - backward compatible
     res.json({
       status: 'success',
       user_id: sanitizedUsername,
@@ -155,10 +201,18 @@ app.post('/extract', async (req, res) => {
       agent_loop: loopResult,
       next_action: loopResult.next_action,
       alerts: loopResult.alerts,
-      message: 'Agent loop executed successfully'
+      message: 'Agent loop executed successfully',
+      // New field (additive, doesn't break existing clients)
+      session_id: sessionId || null
     });
   } catch (error) {
     console.error('[Extract] Error:', error);
+    
+    // Update session status if we have one
+    if (sessionId) {
+      dbService.updateSessionStatus(sessionId, 'failed', error.message).catch(() => {});
+    }
+    
     res.status(500).json({ error: 'Failed to process submissions', details: error.message });
   }
 });
@@ -562,6 +616,405 @@ app.post('/re-diagnose/:userId', validateUserId, async (req, res) => {
 });
 
 // ============================================
+// AUTHENTICATION ROUTES
+// ============================================
+
+/**
+ * POST /signup
+ * Create new user account with email and password
+ */
+app.post('/signup', async (req, res) => {
+  const { email, password, leetcodeUsername } = req.body || {};
+
+  console.log(`[Auth] Signup attempt for: ${email}`);
+
+  const result = await authService.signup(email, password, leetcodeUsername);
+
+  if (!result.success) {
+    return res.status(400).json({
+      error: 'Signup failed',
+      message: result.error
+    });
+  }
+
+  console.log(`[Auth] User created: ${result.user.userId}`);
+
+  res.status(201).json({
+    status: 'success',
+    message: 'Account created successfully',
+    user: result.user,
+    token: result.token
+  });
+});
+
+/**
+ * POST /login
+ * Authenticate user with email and password
+ */
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body || {};
+
+  console.log(`[Auth] Login attempt for: ${email}`);
+
+  const result = await authService.login(email, password);
+
+  if (!result.success) {
+    return res.status(401).json({
+      error: 'Login failed',
+      message: result.error
+    });
+  }
+
+  console.log(`[Auth] User logged in: ${result.user.userId}`);
+
+  res.json({
+    status: 'success',
+    message: 'Login successful',
+    user: result.user,
+    token: result.token
+  });
+});
+
+/**
+ * POST /guest-login
+ * Login/register as guest using LeetCode username
+ * Maintains backward compatibility - does not require password
+ */
+app.post('/guest-login', async (req, res) => {
+  const { leetcodeUsername, username } = req.body || {};
+  const targetUsername = leetcodeUsername || username;
+
+  if (!targetUsername) {
+    return res.status(400).json({
+      error: 'Missing username',
+      message: 'LeetCode username is required'
+    });
+  }
+
+  const result = await authService.guestLogin(targetUsername);
+
+  res.json({
+    status: 'success',
+    message: 'Guest access granted',
+    user: result.user,
+    token: result.token,
+    dbConnected: result.dbConnected !== false
+  });
+});
+
+/**
+ * GET /me
+ * Get current user info from token
+ */
+app.get('/me', authService.authMiddleware, async (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({
+      error: 'Not authenticated',
+      message: 'Please login to access this resource'
+    });
+  }
+
+  const user = await dbService.findUserById(req.user.userId);
+  
+  if (!user) {
+    return res.json({
+      user: req.user,
+      source: 'token'
+    });
+  }
+
+  res.json({
+    user: {
+      userId: user.userId,
+      email: user.email,
+      leetcodeUsername: user.leetcodeUsername,
+      authType: user.authType,
+      preferences: user.preferences,
+      stats: user.stats,
+      lastActive: user.lastActive
+    },
+    source: 'database'
+  });
+});
+
+/**
+ * GET /check-user/:leetcodeUsername
+ * Check if a user exists by LeetCode username and if they have data
+ */
+app.get('/check-user/:leetcodeUsername', async (req, res) => {
+  const { leetcodeUsername } = req.params;
+  
+  if (!leetcodeUsername || typeof leetcodeUsername !== 'string') {
+    return res.status(400).json({
+      error: 'Invalid username',
+      message: 'LeetCode username is required'
+    });
+  }
+  
+  const result = await dbService.checkUserExists(leetcodeUsername);
+  
+  res.json(result || { exists: false });
+});
+
+/**
+ * GET /load-user-data/:userId
+ * Load complete user data for returning users (dashboard population)
+ * 
+ * CRITICAL: Also hydrates the in-memory store so /agent-state returns data
+ */
+app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
+  const userData = await dbService.loadUserData(req.userId);
+  
+  if (!userData) {
+    return res.status(404).json({
+      error: 'User not found',
+      message: 'No data found for this user'
+    });
+  }
+  
+  if (!userData.hasData) {
+    return res.json({
+      user_id: req.userId,
+      hasData: false,
+      message: 'User exists but has no session data. Please extract data from LeetCode.'
+    });
+  }
+  
+  // ============================================
+  // HYDRATE IN-MEMORY STORE FROM DB
+  // DB is source of truth - cache is populated from DB
+  // This ensures /agent-state/:userId returns 'ready' status
+  // ============================================
+  try {
+    console.log(`[Cache] Hydrating memory store for: ${req.userId}`);
+    
+    // 1. Load submissions from DB and flatten for memory store
+    const submissionDocs = userData.submissionDocs || await dbService.getAllUserSubmissions(req.userId);
+    if (submissionDocs && submissionDocs.length > 0) {
+      // Flatten: each submission entry becomes a top-level item (matching extract format)
+      const flatSubmissions = [];
+      for (const doc of submissionDocs) {
+        for (const sub of (doc.submissions || [])) {
+          flatSubmissions.push({
+            id: doc.problemId || doc.titleSlug,
+            title: doc.title,
+            titleSlug: doc.titleSlug,
+            status: sub.status,
+            statusDisplay: sub.statusDisplay || sub.status,
+            lang: sub.language,
+            language: sub.language,
+            code: sub.code,
+            runtime: sub.runtime,
+            memory: sub.memory,
+            timestamp: sub.timestamp ? Math.floor(new Date(sub.timestamp).getTime() / 1000) : null,
+            difficulty: doc.difficulty,
+            topicTags: doc.topicTags || doc.topics || []
+          });
+        }
+      }
+      
+      if (flatSubmissions.length > 0) {
+        memory.addSubmissions(req.userId, flatSubmissions);
+        console.log(`[Cache] Loaded ${flatSubmissions.length} submissions into memory`);
+      }
+    } else if (userData.submissions && userData.submissions.length > 0) {
+      // Fallback: use raw session submissions
+      memory.addSubmissions(req.userId, userData.submissions);
+      console.log(`[Cache] Loaded ${userData.submissions.length} session submissions into memory`);
+    }
+    
+    // 2. Hydrate agent outputs (if available)
+    const agentOutput = userData.agentOutput;
+    if (agentOutput) {
+      if (agentOutput.diagnosis) {
+        memory.storeDiagnosis(req.userId, agentOutput.diagnosis);
+      }
+      if (agentOutput.goals && agentOutput.goals.length > 0) {
+        memory.storeGoals(req.userId, agentOutput.goals);
+      }
+      if (agentOutput.plan) {
+        memory.storePlan(req.userId, agentOutput.plan);
+      }
+      if (agentOutput.monitoring) {
+        memory.storeProgress(req.userId, agentOutput.monitoring);
+      }
+      if (agentOutput.adaptation) {
+        memory.storeAdaptation(req.userId, agentOutput.adaptation);
+      }
+    }
+    
+    // 3. Also hydrate goals from goals collection if agentOutput doesn't have them
+    if (userData.goals && userData.goals.length > 0 && !agentOutput?.goals?.length) {
+      memory.storeGoals(req.userId, userData.goals);
+      console.log(`[Cache] Loaded ${userData.goals.length} goals from goals collection`);
+    }
+    
+    // 4. Mark agent loop as complete so /agent-state returns 'ready'
+    memory.updateAgentStage(req.userId, 'complete');
+    
+    console.log(`[Cache] ✓ Memory store hydrated for: ${req.userId}`);
+  } catch (hydrateErr) {
+    // Non-blocking: if hydration fails, still return the API response
+    console.error('[Cache] Hydration failed (non-blocking):', hydrateErr.message);
+  }
+  
+  // Format response to match existing frontend expectations
+  const formattedData = {
+    user_id: req.userId,
+    hasData: userData.hasData, // Based on submissions count from DB
+    session: {
+      sessionId: userData.session?.sessionId,
+      timestamp: userData.session?.createdAt,
+      summaryStats: userData.session?.summaryStats
+    },
+    // Agent outputs in format expected by frontend
+    agentOutput: userData.agentOutput ? {
+      diagnosis: userData.agentOutput.diagnosis,
+      goals: userData.agentOutput.goals,
+      plan: userData.agentOutput.plan,
+      monitoring: userData.agentOutput.monitoring,
+      adaptation: userData.agentOutput.adaptation,
+      nextAction: userData.agentOutput.nextAction
+    } : null,
+    activeGoals: userData.goals || [],
+    progressHistory: userData.progressHistory || [],
+    pendingActions: userData.pendingActions || [],
+    // Include submissions with analysis from submissions collection
+    submissionDocs: userData.submissionDocs || [],
+    source: 'database'
+  };
+  
+  console.log(`[DB] Returning user data - hasData: ${formattedData.hasData}, submissions: ${formattedData.submissionDocs.length}`);
+  res.json(formattedData);
+});
+
+// ============================================
+// HISTORY & ANALYTICS ROUTES (MongoDB)
+// ============================================
+
+/**
+ * GET /sessions/:userId
+ * Get user's session history
+ */
+app.get('/sessions/:userId', validateUserId, async (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 10;
+  const sessions = await dbService.getRecentSessions(req.userId, limit);
+  
+  res.json({
+    user_id: req.userId,
+    sessions: sessions || [],
+    count: sessions?.length || 0,
+    source: sessions ? 'database' : 'unavailable'
+  });
+});
+
+/**
+ * GET /submission-history/:userId/:problemId
+ * Get submission history for a specific problem
+ */
+app.get('/submission-history/:userId/:problemId', validateUserId, async (req, res) => {
+  const { problemId } = req.params;
+  const history = await dbService.getSubmissionHistory(req.userId, problemId);
+  
+  if (!history) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'No submission history found for this problem'
+    });
+  }
+
+  res.json({
+    user_id: req.userId,
+    problem_id: problemId,
+    history
+  });
+});
+
+/**
+ * GET /user-stats/:userId
+ * Get user's overall submission statistics from MongoDB
+ */
+app.get('/user-stats/:userId', validateUserId, async (req, res) => {
+  const stats = await dbService.getUserSubmissionStats(req.userId);
+  
+  res.json({
+    user_id: req.userId,
+    stats: stats || null,
+    source: stats ? 'database' : 'unavailable'
+  });
+});
+
+/**
+ * GET /progress-history/:userId
+ * Get user's progress snapshots over time
+ */
+app.get('/progress-history/:userId', validateUserId, async (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 30;
+  const history = await dbService.getProgressHistory(req.userId, limit);
+  const trend = await dbService.getImprovementTrend(req.userId);
+  
+  res.json({
+    user_id: req.userId,
+    history: history || [],
+    trend: trend || null,
+    source: history ? 'database' : 'unavailable'
+  });
+});
+
+/**
+ * GET /active-goals/:userId
+ * Get user's active goals from MongoDB
+ */
+app.get('/active-goals/:userId', validateUserId, async (req, res) => {
+  const goals = await dbService.getActiveGoals(req.userId);
+  
+  res.json({
+    user_id: req.userId,
+    goals: goals || [],
+    count: goals?.length || 0,
+    source: goals ? 'database' : 'unavailable'
+  });
+});
+
+/**
+ * GET /pending-actions/:userId
+ * Get user's pending recommended actions
+ */
+app.get('/pending-actions/:userId', validateUserId, async (req, res) => {
+  const actions = await dbService.getPendingActions(req.userId);
+  
+  res.json({
+    user_id: req.userId,
+    actions: actions || [],
+    count: actions?.length || 0,
+    source: actions ? 'database' : 'unavailable'
+  });
+});
+
+/**
+ * POST /complete-action/:actionId
+ * Mark an action as completed
+ */
+app.post('/complete-action/:actionId', async (req, res) => {
+  const { actionId } = req.params;
+  const { completedProblems } = req.body || {};
+
+  const result = await dbService.completeAction(actionId, completedProblems || []);
+  
+  if (!result) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Action not found or already completed'
+    });
+  }
+
+  res.json({
+    status: 'success',
+    action: result
+  });
+});
+
+// ============================================
 // SYSTEM ROUTES
 // ============================================
 
@@ -569,22 +1022,30 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'DebugMind AI - Agentic Learning System',
-    version: '2.1.0',
+    version: '2.2.0',
     features: [
       'Agent Decision Logging',
       'Confidence Tracking',
       'Strategy Evolution',
       'Smart Alerts',
-      'Next Action Recommendations'
+      'Next Action Recommendations',
+      'MongoDB Persistence',
+      'User Authentication',
+      'Session History',
+      'Progress Tracking'
     ],
     agents: ['diagnosis', 'goal', 'planning', 'monitoring', 'adaptation'],
+    database: {
+      enabled: dbService.isDBConnected(),
+      type: 'MongoDB'
+    },
     timestamp: new Date().toISOString()
   });
 });
 
 app.get('/api-docs', (req, res) => {
   res.json({
-    version: '2.1.0',
+    version: '2.2.0',
     endpoints: {
       core: [
         { method: 'POST', path: '/extract', description: 'Extract submissions and run agent loop' },
@@ -592,9 +1053,24 @@ app.get('/api-docs', (req, res) => {
         { method: 'POST', path: '/code-analysis', description: 'Deep AI analysis of submissions using Gemini' },
         { method: 'GET', path: '/code-analysis/:userId', description: 'Get cached code analysis' }
       ],
+      auth: [
+        { method: 'POST', path: '/signup', description: 'Create new user account' },
+        { method: 'POST', path: '/login', description: 'Login with email/password' },
+        { method: 'POST', path: '/guest-login', description: 'Guest login with LeetCode username' },
+        { method: 'GET', path: '/me', description: 'Get current user info from token' }
+      ],
       state: [
         { method: 'GET', path: '/agent-state/:userId', description: 'Get full agent state' },
         { method: 'POST', path: '/update-progress', description: 'Submit new data for incremental update' }
+      ],
+      history: [
+        { method: 'GET', path: '/sessions/:userId', description: 'Get session history' },
+        { method: 'GET', path: '/submission-history/:userId/:problemId', description: 'Get problem submission history' },
+        { method: 'GET', path: '/user-stats/:userId', description: 'Get overall submission statistics' },
+        { method: 'GET', path: '/progress-history/:userId', description: 'Get progress snapshots over time' },
+        { method: 'GET', path: '/active-goals/:userId', description: 'Get active learning goals' },
+        { method: 'GET', path: '/pending-actions/:userId', description: 'Get pending recommended actions' },
+        { method: 'POST', path: '/complete-action/:actionId', description: 'Mark action as completed' }
       ],
       explainability: [
         { method: 'GET', path: '/agent-logs/:userId', description: 'Get agent decision logs' },
@@ -617,6 +1093,9 @@ app.get('/api-docs', (req, res) => {
       debug: [
         { method: 'GET', path: '/debug-cache', description: 'View all cached user data (debug only)' }
       ]
+    },
+    database: {
+      status: dbService.isDBConnected() ? 'connected' : 'disconnected'
     }
   });
 });
