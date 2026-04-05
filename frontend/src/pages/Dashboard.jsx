@@ -64,7 +64,7 @@ const NextStepsCard = ({ nextSteps }) => {
   if (!nextSteps || nextSteps.length === 0) return null;
 
   return (
-    <Card className="p-5 bg-gradient-to-br from-accent-teal/10 to-transparent border-accent-teal/20">
+    <Card className="p-5 bg-linear-to-br from-accent-teal/10 to-transparent border-accent-teal/20">
       <div className="flex items-center gap-2 mb-4">
         <ListOrdered size={18} className="text-accent-teal" />
         <h3 className="font-bold">Next Steps</h3>
@@ -120,7 +120,7 @@ const DynamicSummary = ({ data, agentState }) => {
   }
 
   return (
-    <Card className="bg-gradient-to-br from-accent-purple/10 to-transparent border-accent-purple/20">
+    <Card className="bg-linear-to-br from-accent-purple/10 to-transparent border-accent-purple/20">
       <h3 className="font-bold mb-3 flex items-center gap-2 text-accent-purple">
         <BrainCircuit size={18} /> AI Summary
       </h3>

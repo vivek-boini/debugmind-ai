@@ -149,7 +149,7 @@ export const StrategyEvolution = ({ evolution }) => {
   if (!evolution) return null;
 
   return (
-    <Card className="bg-gradient-to-r from-slate-800/50 to-transparent">
+    <Card className="bg-linear-to-r from-slate-800/50 to-transparent">
       <div className="flex items-center gap-2 mb-4">
         <History size={18} className="text-accent-purple" />
         <h3 className="font-bold">Strategy Evolution</h3>
@@ -317,7 +317,7 @@ export const AgentLoopIndicator = ({ currentStage, stageDescription, isRunning }
   const getCurrentIndex = () => stages.findIndex(s => s.id === currentStage);
 
   return (
-    <Card className="bg-gradient-to-r from-accent-purple/5 to-accent-teal/5 border-accent-purple/20">
+    <Card className="bg-linear-to-r from-accent-purple/5 to-accent-teal/5 border-accent-purple/20">
       <div className="flex items-center justify-between mb-2">
         <h3 className="font-bold text-sm flex items-center gap-2">
           <RefreshCw size={16} className={isRunning ? "animate-spin text-accent-teal" : "text-slate-400"} />
@@ -613,7 +613,7 @@ export const AdaptationPanel = ({ adaptation }) => {
   };
 
   return (
-    <Card className="bg-gradient-to-br from-accent-teal/5 to-transparent border-accent-teal/20">
+    <Card className="bg-linear-to-br from-accent-teal/5 to-transparent border-accent-teal/20">
       <div className="flex items-center justify-between mb-4">
         <h3 className="font-bold flex items-center gap-2">
           <Activity size={18} className="text-accent-teal" />

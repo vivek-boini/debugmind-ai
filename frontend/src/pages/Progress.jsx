@@ -23,7 +23,7 @@ const LearningVelocityCard = ({ velocity }) => {
   const { icon: Icon, color, bg, label, desc } = config[velocity.direction] || config.stable;
 
   return (
-    <Card className={`p-5 bg-gradient-to-br ${bg} to-transparent`}>
+    <Card className={`p-5 bg-linear-to-br ${bg} to-transparent`}>
       <div className="flex items-center gap-3 mb-3">
         <div className={`w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center ${color}`}>
           <Icon size={24} />

@@ -159,19 +159,19 @@ const GoalsSummary = ({ goals }) => {
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-      <Card className="p-4 text-center bg-gradient-to-br from-red-500/10 to-transparent">
+      <Card className="p-4 text-center bg-linear-to-br from-red-500/10 to-transparent">
         <div className="text-2xl font-bold text-red-400">{critical}</div>
         <div className="text-xs text-slate-500">Critical</div>
       </Card>
-      <Card className="p-4 text-center bg-gradient-to-br from-amber-500/10 to-transparent">
+      <Card className="p-4 text-center bg-linear-to-br from-amber-500/10 to-transparent">
         <div className="text-2xl font-bold text-amber-400">{high}</div>
         <div className="text-xs text-slate-500">High Priority</div>
       </Card>
-      <Card className="p-4 text-center bg-gradient-to-br from-accent-purple/10 to-transparent">
+      <Card className="p-4 text-center bg-linear-to-br from-accent-purple/10 to-transparent">
         <div className="text-2xl font-bold text-accent-purple">{medium}</div>
         <div className="text-xs text-slate-500">Medium</div>
       </Card>
-      <Card className="p-4 text-center bg-gradient-to-br from-emerald-500/10 to-transparent">
+      <Card className="p-4 text-center bg-linear-to-br from-emerald-500/10 to-transparent">
         <div className="text-2xl font-bold text-emerald-400">{avgProgress}%</div>
         <div className="text-xs text-slate-500">Avg Progress</div>
       </Card>
@@ -221,7 +221,7 @@ export default function Goals() {
 
       {/* Summary Message */}
       {goalsData.summary && (
-        <Card className="p-4 bg-gradient-to-r from-accent-purple/10 to-transparent border-accent-purple/20">
+        <Card className="p-4 bg-linear-to-r from-accent-purple/10 to-transparent border-accent-purple/20">
           <p className="text-sm text-slate-300 italic">{goalsData.summary}</p>
         </Card>
       )}

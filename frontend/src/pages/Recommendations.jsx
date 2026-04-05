@@ -100,7 +100,7 @@ const PersonalizationInfo = ({ plan }) => {
   if (!plan?.personalization || plan.personalization.length === 0) return null;
 
   return (
-    <Card className="p-4 bg-gradient-to-r from-accent-teal/5 to-transparent border-accent-teal/20 mb-6">
+    <Card className="p-4 bg-linear-to-r from-accent-teal/5 to-transparent border-accent-teal/20 mb-6">
       <div className="flex items-center gap-2 mb-3">
         <Zap size={16} className="text-accent-teal" />
         <h3 className="font-semibold text-sm">Why These Problems?</h3>
@@ -210,19 +210,19 @@ export default function Recommendations() {
 
       {/* Quick Stats */}
       <div className="grid grid-cols-3 gap-4">
-        <Card className="p-4 text-center bg-gradient-to-br from-emerald-500/10 to-transparent">
+        <Card className="p-4 text-center bg-linear-to-br from-emerald-500/10 to-transparent">
           <div className="text-2xl font-bold text-emerald-400">
             {problems.filter(p => (typeof p === 'object' ? p.difficulty : 'medium') === 'easy').length}
           </div>
           <div className="text-xs text-slate-500 mt-1">Easy</div>
         </Card>
-        <Card className="p-4 text-center bg-gradient-to-br from-amber-500/10 to-transparent">
+        <Card className="p-4 text-center bg-linear-to-br from-amber-500/10 to-transparent">
           <div className="text-2xl font-bold text-amber-400">
             {problems.filter(p => (typeof p === 'object' ? p.difficulty : 'medium') === 'medium').length}
           </div>
           <div className="text-xs text-slate-500 mt-1">Medium</div>
         </Card>
-        <Card className="p-4 text-center bg-gradient-to-br from-red-500/10 to-transparent">
+        <Card className="p-4 text-center bg-linear-to-br from-red-500/10 to-transparent">
           <div className="text-2xl font-bold text-red-400">
             {problems.filter(p => (typeof p === 'object' ? p.difficulty : 'medium') === 'hard').length}
           </div>

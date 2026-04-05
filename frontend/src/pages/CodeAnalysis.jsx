@@ -380,7 +380,7 @@ function InsightCard({ insight }) {
   if (!insight) return null;
   
   return (
-    <div className="p-5 bg-gradient-to-r from-accent-purple/10 to-accent-teal/10 rounded-xl border border-accent-purple/30">
+    <div className="p-5 bg-linear-to-r from-accent-purple/10 to-accent-teal/10 rounded-xl border border-accent-purple/30">
       <div className="flex items-center gap-2 mb-3">
         <Brain size={18} className="text-yellow-400" />
         <h4 className="font-semibold text-white">Key Insight</h4>
@@ -592,7 +592,7 @@ function ComparisonInsight({ comparisonText }) {
   if (!comparisonText) return null;
   
   return (
-    <div className="p-5 bg-gradient-to-r from-accent-teal/10 to-accent-purple/10 rounded-xl border border-accent-teal/30">
+    <div className="p-5 bg-linear-to-r from-accent-teal/10 to-accent-purple/10 rounded-xl border border-accent-teal/30">
       <div className="flex items-center gap-2 mb-3">
         <GitCompare size={18} className="text-accent-teal" />
         <h4 className="font-semibold text-white">Progression Analysis</h4>
@@ -767,7 +767,7 @@ function ComparativeAnalysisDisplay({
         <div className="space-y-4">
           {/* Enhanced Progression Timeline */}
           {isMultiSubmission && (
-            <div className="p-5 bg-gradient-to-r from-slate-800/50 to-slate-800/30 rounded-xl border border-slate-700 animate-fade-in">
+            <div className="p-5 bg-linear-to-r from-slate-800/50 to-slate-800/30 rounded-xl border border-slate-700 animate-fade-in">
               <div className="flex items-center gap-2 mb-4">
                 <TrendingUp size={18} className="text-accent-teal" />
                 <h4 className="font-semibold text-accent-teal">Progression Timeline</h4>
@@ -800,7 +800,7 @@ function ComparativeAnalysisDisplay({
 
           {/* Key Change Highlight - NEW */}
           {data.keyChange && (
-            <div className="p-5 bg-gradient-to-r from-emerald-500/10 to-teal-500/10 rounded-xl border border-emerald-500/30 animate-fade-in">
+            <div className="p-5 bg-linear-to-r from-emerald-500/10 to-teal-500/10 rounded-xl border border-emerald-500/30 animate-fade-in">
               <div className="flex items-center gap-2 mb-3">
                 <Sparkles size={18} className="text-emerald-400" />
                 <h4 className="font-semibold text-emerald-400">Key Breakthrough</h4>
@@ -885,7 +885,7 @@ function ComparativeAnalysisDisplay({
 
           {/* Next Practice Recommendations - NEW */}
           {data.nextPractice && data.nextPractice.length > 0 && (
-            <div className="p-5 bg-gradient-to-r from-blue-500/10 to-indigo-500/10 rounded-xl border border-blue-500/30 animate-fade-in">
+            <div className="p-5 bg-linear-to-r from-blue-500/10 to-indigo-500/10 rounded-xl border border-blue-500/30 animate-fade-in">
               <div className="flex items-center gap-2 mb-3">
                 <Compass size={18} className="text-blue-400" />
                 <h4 className="font-semibold text-blue-400">Next Practice Focus</h4>
@@ -906,7 +906,7 @@ function ComparativeAnalysisDisplay({
 
           {/* Learning Insight */}
           {data.learningInsight && (
-            <div className="p-5 bg-gradient-to-r from-accent-purple/10 to-accent-teal/10 rounded-xl border border-accent-purple/30 animate-fade-in">
+            <div className="p-5 bg-linear-to-r from-accent-purple/10 to-accent-teal/10 rounded-xl border border-accent-purple/30 animate-fade-in">
               <div className="flex items-center gap-2 mb-3">
                 <Lightbulb size={18} className="text-yellow-400" />
                 <h4 className="font-semibold text-white">What You Learned</h4>
@@ -917,7 +917,7 @@ function ComparativeAnalysisDisplay({
 
           {/* FIX 5: Optimal Approach Section */}
           {data.optimalApproach && (
-            <div className="p-5 bg-gradient-to-r from-cyan-500/10 to-blue-500/10 rounded-xl border border-cyan-500/30 animate-fade-in">
+            <div className="p-5 bg-linear-to-r from-cyan-500/10 to-blue-500/10 rounded-xl border border-cyan-500/30 animate-fade-in">
               <div className="flex items-center gap-2 mb-3">
                 <Award size={18} className="text-cyan-400" />
                 <h4 className="font-semibold text-white">💡 Optimal Approach</h4>
@@ -927,7 +927,7 @@ function ComparativeAnalysisDisplay({
           )}
 
           {/* Generate Optimal Solution Section */}
-          <div className="p-5 bg-gradient-to-r from-emerald-500/5 to-teal-500/5 rounded-xl border border-emerald-500/20 animate-fade-in">
+          <div className="p-5 bg-linear-to-r from-emerald-500/5 to-teal-500/5 rounded-xl border border-emerald-500/20 animate-fade-in">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Code size={18} className="text-emerald-400" />
@@ -1468,7 +1468,7 @@ function LazyAnalysisDetail({
         />
       ) : (
         /* Fallback to raw display if parsing failed */
-        <div className="p-6 bg-gradient-to-r from-slate-800/80 to-slate-800/50 rounded-xl border border-slate-700">
+        <div className="p-6 bg-linear-to-r from-slate-800/80 to-slate-800/50 rounded-xl border border-slate-700">
           <div className="flex items-center gap-2 mb-4">
             <Lightbulb size={20} className="text-yellow-400" />
             <h3 className="font-semibold text-white">AI Analysis</h3>
