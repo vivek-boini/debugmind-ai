@@ -973,6 +973,39 @@ actionSchema.statics.createFromNextAction = async function(userId, sessionId, ne
 const Action = mongoose.model('Action', actionSchema);
 
 // ============================================
+// PROBLEM MODEL (LeetCode problem metadata cache)
+// ============================================
+
+const problemSchema = new mongoose.Schema({
+  titleSlug: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    trim: true,
+    index: true
+  },
+  title: String,
+  shortDescription: String,   // Plain text, max 500 chars (HTML stripped)
+  difficulty: {
+    type: String,
+    enum: ['Easy', 'Medium', 'Hard', 'Unknown'],
+    default: 'Unknown'
+  },
+  tags: [String],              // Normalized tag names
+  examples: String,            // Example test cases (max 500 chars)
+  constraints: String,         // Extracted constraints (max 300 chars)
+  similarProblems: [{          // From LeetCode similarQuestions
+    title: String,
+    titleSlug: String,
+    difficulty: { type: String, enum: ['Easy', 'Medium', 'Hard', 'Unknown'], default: 'Unknown' }
+  }],
+  fetchedAt: Date
+}, { timestamps: true });
+
+const Problem = mongoose.model('Problem', problemSchema);
+
+// ============================================
 // EXPORTS
 // ============================================
 
@@ -990,6 +1023,7 @@ export {
   Goal,
   ProgressSnapshot,
   Action,
+  Problem,
   
   // Helpers
   normalizeTopic,

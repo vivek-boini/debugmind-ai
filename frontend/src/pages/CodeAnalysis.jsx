@@ -460,9 +460,140 @@ function InsightCard({ insight }) {
 }
 
 // ============================================================================
+// PROBLEM DETAILS CARD — Shows problem context (description, tags, constraints)
+// Renders above AI analysis for full problem awareness
+// ============================================================================
+
+const DIFFICULTY_COLORS = {
+  Easy: 'bg-green-500/20 text-green-400 border-green-500/30',
+  Medium: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  Hard: 'bg-red-500/20 text-red-400 border-red-500/30',
+  Unknown: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
+};
+
+const TAG_COLORS = [
+  'bg-blue-500/15 text-blue-300 border-blue-500/25',
+  'bg-purple-500/15 text-purple-300 border-purple-500/25',
+  'bg-cyan-500/15 text-cyan-300 border-cyan-500/25',
+  'bg-teal-500/15 text-teal-300 border-teal-500/25',
+  'bg-indigo-500/15 text-indigo-300 border-indigo-500/25',
+  'bg-pink-500/15 text-pink-300 border-pink-500/25',
+  'bg-emerald-500/15 text-emerald-300 border-emerald-500/25',
+];
+
+function ProblemDetailsCard({ problemDetails }) {
+  if (!problemDetails) return null;
+
+  const { shortDescription, difficulty, tags, constraints, examples, similarProblems } = problemDetails;
+  const [showExamples, setShowExamples] = useState(false);
+
+  // If nothing to show, skip rendering
+  if (!shortDescription && (!tags || tags.length === 0) && !constraints && !examples) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-700/50 bg-slate-800/40 overflow-hidden">
+      {/* Header bar with difficulty badge */}
+      <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <BookOpen size={16} className="text-slate-400" />
+          <span className="text-sm font-semibold text-slate-300">Problem Context</span>
+        </div>
+        {difficulty && (
+          <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${DIFFICULTY_COLORS[difficulty] || DIFFICULTY_COLORS.Unknown}`}>
+            {difficulty}
+          </span>
+        )}
+      </div>
+
+      <div className="p-4 space-y-4">
+        {/* Tags as pills */}
+        {tags && tags.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {tags.map((tag, i) => (
+              <span 
+                key={tag} 
+                className={`text-xs px-2.5 py-1 rounded-full border font-medium ${TAG_COLORS[i % TAG_COLORS.length]}`}
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Description */}
+        {shortDescription && (
+          <div>
+            <p className="text-sm text-slate-300 leading-relaxed">
+              {shortDescription.length > 300 
+                ? `${shortDescription.slice(0, 300)}...` 
+                : shortDescription}
+            </p>
+          </div>
+        )}
+
+        {/* Constraints */}
+        {constraints && (
+          <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/30">
+            <p className="text-xs font-semibold text-slate-400 mb-1.5">📌 Constraints</p>
+            <pre className="text-xs text-slate-400 whitespace-pre-wrap font-mono leading-relaxed">
+              {constraints.slice(0, 200)}
+            </pre>
+          </div>
+        )}
+
+        {/* Examples (collapsible) */}
+        {examples && (
+          <div>
+            <button 
+              onClick={() => setShowExamples(!showExamples)}
+              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-300 transition-colors"
+            >
+              <ChevronRight size={12} className={`transition-transform ${showExamples ? 'rotate-90' : ''}`} />
+              <span>🧪 Example Test Cases</span>
+            </button>
+            {showExamples && (
+              <pre className="mt-2 text-xs text-slate-400 bg-slate-900/50 rounded-lg p-3 border border-slate-700/30 font-mono whitespace-pre-wrap">
+                {examples.slice(0, 300)}
+              </pre>
+            )}
+          </div>
+        )}
+
+        {/* Similar Problems */}
+        {similarProblems && similarProblems.length > 0 && (
+          <div className="pt-2 border-t border-slate-700/30">
+            <p className="text-xs font-semibold text-slate-400 mb-2">🔁 Similar Problems</p>
+            <div className="flex flex-wrap gap-2">
+              {similarProblems.slice(0, 3).map((sp) => (
+                <a
+                  key={sp.titleSlug}
+                  href={`https://leetcode.com/problems/${sp.titleSlug}/`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-slate-700/30 border border-slate-600/30 text-slate-300 hover:bg-slate-700/60 hover:text-white transition-all"
+                >
+                  <span>{sp.title}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${DIFFICULTY_COLORS[sp.difficulty] || DIFFICULTY_COLORS.Unknown}`}>
+                    {sp.difficulty}
+                  </span>
+                  <ArrowUpRight size={10} className="text-slate-500" />
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // DB ANALYSIS DISPLAY — Clean structured UI for LLM analysis from database
 // Renders {mistakes, patterns, complexity, improvement} as visual cards
 // ============================================================================
+
 
 function DBAnalysisDisplay({ dbAnalysis, analysis }) {
   if (!dbAnalysis) return null;
@@ -1578,7 +1709,8 @@ function LazyAnalysisDetail({
   onAnalyzeSingle,
   onGenerateSolution,
   generatedSolutions,
-  loadingSolution 
+  loadingSolution,
+  problemDetails
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -1666,6 +1798,9 @@ function LazyAnalysisDetail({
         </div>
       </div>
 
+      {/* Problem Context — shown at TOP, above everything */}
+      <ProblemDetailsCard problemDetails={problemDetails} />
+
       {/* AI Insights Section — shown ABOVE journey/code, not instead of it */}
       {hasDBAnalysis && (
         <DBAnalysisDisplay dbAnalysis={analysis.dbAnalysis} analysis={analysis} />
@@ -1718,6 +1853,24 @@ export default function CodeAnalysis() {
   // New state for solution generation
   const [generatedSolutions, setGeneratedSolutions] = useState({});
   const [loadingSolution, setLoadingSolution] = useState(null);
+
+  // Problem details cache (fetched from /problem-details/:titleSlug)
+  const [problemDetailsCache, setProblemDetailsCache] = useState({});
+
+  // Fetch problem details from backend cache
+  const fetchProblemDetails = async (titleSlug) => {
+    if (!titleSlug || problemDetailsCache[titleSlug]) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/problem-details/${encodeURIComponent(titleSlug)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setProblemDetailsCache(prev => ({ ...prev, [titleSlug]: data }));
+      }
+    } catch (e) {
+      // Non-critical — don't show error
+      console.log(`[CodeAnalysis] Problem details not available for: ${titleSlug}`);
+    }
+  };
 
   // Group submissions by problem title
   const groupedProblems = useMemo(() => {
@@ -1847,6 +2000,12 @@ export default function CodeAnalysis() {
     setSelectedProblemTitle(problemTitle);
     setSelectedIndex(null);
     
+    // Fetch problem details (async, non-blocking)
+    const doc = submissionDocs.find(d => d.title === problemTitle);
+    if (doc?.titleSlug) {
+      fetchProblemDetails(doc.titleSlug);
+    }
+
     setExpandedProblems(prev => ({
       ...prev,
       [problemTitle]: true
@@ -1867,7 +2026,7 @@ export default function CodeAnalysis() {
     }
 
     // Check if we have analysis in submissionDocs (from DB)
-    const doc = submissionDocs.find(d => d.title === problemTitle);
+    // (doc already declared above for fetchProblemDetails)
     if (doc?.analysis?.lastAnalyzedAt) {
       const analysisResult = {
         title: problemTitle,
@@ -2112,6 +2271,13 @@ export default function CodeAnalysis() {
                 onGenerateSolution={handleGenerateSolution}
                 generatedSolutions={generatedSolutions}
                 loadingSolution={loadingSolution}
+                problemDetails={
+                  selectedProblemTitle 
+                    ? problemDetailsCache[
+                        submissionDocs.find(d => d.title === selectedProblemTitle)?.titleSlug
+                      ]
+                    : null
+                }
               />
             )}
           </div>

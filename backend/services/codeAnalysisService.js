@@ -14,6 +14,7 @@
 
 import { generateLLMInsights, tryParseJSON, isAvailable } from './llmService.js';
 import * as dbService from './dbService.js';
+import { getProblemWithCache } from './problemService.js';
 
 /**
  * Run LLM analysis for a user's recent submissions
@@ -80,10 +81,27 @@ async function runLLMAnalysis(userId) {
         .map(([type, count]) => `${type}: ${count}`)
         .join(', ') || 'None';
 
+      // Fetch problem context from cache (non-blocking, null fallback)
+      let problemContext = '';
+      try {
+        const problem = await getProblemWithCache(doc.titleSlug);
+        if (problem) {
+          const parts = [];
+          if (problem.shortDescription) parts.push(`Description: ${problem.shortDescription}`);
+          if (problem.examples) parts.push(`Examples: ${problem.examples.slice(0, 200)}`);
+          if (problem.constraints) parts.push(`Constraints: ${problem.constraints.slice(0, 200)}`);
+          if (problem.tags?.length) parts.push(`Tags: ${problem.tags.join(', ')}`);
+          problemContext = parts.join('\n');
+        }
+      } catch (e) {
+        // Fallback: no problem context, continue with title-only
+      }
+
       const prompt = `Analyze this LeetCode problem attempt and return STRICT JSON only.
 
 Problem: "${doc.title}"
 Difficulty: ${doc.difficulty || 'Unknown'}
+${problemContext ? `\n${problemContext}\n` : ''}
 Total Attempts: ${totalAttempts}
 Accepted: ${acceptedCount}
 Success Rate: ${successRate}%
@@ -100,7 +118,7 @@ Return this exact JSON structure:
 }
 
 Rules:
-- mistakes: 2-3 likely mistakes based on error types and attempt count
+- mistakes: 2-3 likely mistakes based on error types, problem description, and attempt count
 - patterns: 2 algorithmic patterns relevant to this problem
 - complexity: expected optimal complexity for this problem type
 - improvement: 1 concrete improvement tip`;

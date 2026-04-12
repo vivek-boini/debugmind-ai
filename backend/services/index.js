@@ -14,6 +14,7 @@ import * as llmService from './llmService.js';
 // MongoDB integration services
 import * as dbService from './dbService.js';
 import * as authService from './authService.js';
+import * as problemService from './problemService.js';
 
 export {
   orchestrator,
@@ -24,5 +25,6 @@ export {
   codeAnalysisService,
   llmService,
   dbService,
-  authService
+  authService,
+  problemService
 };

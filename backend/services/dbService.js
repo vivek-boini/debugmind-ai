@@ -15,7 +15,8 @@ import {
   AgentOutput,
   Goal,
   ProgressSnapshot,
-  Action
+  Action,
+  Problem
 } from './mongoModels.js';
 
 // Track initialization
@@ -745,6 +746,32 @@ async function checkUserExists(leetcodeUsername) {
 }
 
 // ============================================
+// PROBLEM METADATA OPERATIONS
+// ============================================
+
+/**
+ * Get cached problem details from DB
+ */
+async function getProblemDetails(titleSlug) {
+  return safeOperation(async () => {
+    return Problem.findOne({ titleSlug: titleSlug.toLowerCase().trim() }).lean();
+  }, `getProblemDetails(${titleSlug})`);
+}
+
+/**
+ * Upsert problem metadata into DB
+ */
+async function upsertProblem(problemData) {
+  return safeOperation(async () => {
+    return Problem.findOneAndUpdate(
+      { titleSlug: problemData.titleSlug },
+      { $set: problemData },
+      { upsert: true, new: true }
+    );
+  }, `upsertProblem(${problemData.titleSlug})`);
+}
+
+// ============================================
 // EXPORTS
 // ============================================
 
@@ -797,5 +824,9 @@ export {
   
   // Returning user
   loadUserData,
-  checkUserExists
+  checkUserExists,
+  
+  // Problem metadata
+  getProblemDetails,
+  upsertProblem
 };

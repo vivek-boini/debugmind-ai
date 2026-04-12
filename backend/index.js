@@ -8,7 +8,7 @@ const app = express();
 const port = process.env.PORT || 4000;
 
 // Import agent system
-import { orchestrator, memory, logger, codeAnalysisService, llmService, dbService, authService } from './services/index.js';
+import { orchestrator, memory, logger, codeAnalysisService, llmService, dbService, authService, problemService } from './services/index.js';
 import * as agents from './agents/index.js';
 
 // Initialize MongoDB connection (non-blocking)
@@ -197,13 +197,26 @@ app.post('/extract', async (req, res) => {
       // ============================================
       // ASYNC LLM PIPELINE (fire-and-forget, NON-BLOCKING)
       // Runs AFTER DB persistence is COMPLETE
-      // Flow: LLM analysis → re-run agents with enriched data → UPSERT AgentOutput
+      // Flow: Fetch problem metadata → LLM analysis → re-run agents → UPSERT AgentOutput
       // ============================================
       process.nextTick(async () => {
         try {
           console.log(`[AsyncPipeline] Starting for ${sanitizedUsername}`);
           
-          // Step 1: Run LLM analysis on recent problems
+          // Step 0: Fetch problem metadata (BEFORE LLM, so LLM gets context)
+          try {
+            const titleSlugs = [...new Set(
+              submissions.map(s => s.titleSlug).filter(Boolean)
+            )];
+            if (titleSlugs.length > 0) {
+              const problemMap = await problemService.fetchAndCacheProblems(titleSlugs);
+              console.log(`[AsyncPipeline] Problem metadata: ${problemMap.size}/${titleSlugs.length} cached`);
+            }
+          } catch (problemErr) {
+            console.warn('[AsyncPipeline] Problem fetch failed (non-fatal):', problemErr.message);
+          }
+          
+          // Step 1: Run LLM analysis on recent problems (now with problem context)
           const llmResult = await codeAnalysisService.runLLMAnalysis(sanitizedUsername);
           console.log(`[AsyncPipeline] LLM analysis: ${llmResult.analyzed} analyzed, ${llmResult.skipped} skipped, ${llmResult.errors} errors`);
           
@@ -1035,6 +1048,28 @@ app.post('/complete-action/:actionId', async (req, res) => {
 // SYSTEM ROUTES
 // ============================================
 
+// ============================================
+// PROBLEM METADATA ENDPOINT
+// ============================================
+
+app.get('/problem-details/:titleSlug', async (req, res) => {
+  const { titleSlug } = req.params;
+  if (!titleSlug) {
+    return res.status(400).json({ error: 'titleSlug is required' });
+  }
+
+  try {
+    const problem = await problemService.getProblemWithCache(titleSlug);
+    if (!problem) {
+      return res.status(404).json({ error: 'Problem not found', titleSlug });
+    }
+    res.json(problem);
+  } catch (error) {
+    console.error('[ProblemDetails] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch problem details' });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
@@ -1343,6 +1378,23 @@ app.post('/generate-solution', async (req, res) => {
     const codeSnippet = (latest.code || '').slice(0, 1500);
     const language = latest.lang || latest.language || 'Python';
     const title = problemTitle || latest.title || 'Problem';
+    const titleSlug = latest.titleSlug || title.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    
+    // Fetch problem context for accurate solution
+    let problemSection = '';
+    try {
+      const problem = await problemService.getProblemWithCache(titleSlug);
+      if (problem) {
+        const parts = [];
+        if (problem.shortDescription) parts.push(`Description: ${problem.shortDescription}`);
+        if (problem.examples) parts.push(`Examples:\n${problem.examples.slice(0, 300)}`);
+        if (problem.constraints) parts.push(`Constraints: ${problem.constraints.slice(0, 200)}`);
+        problemSection = parts.join('\n\n');
+        console.log(`[GenerateSolution] ✓ Problem context loaded for: ${titleSlug}`);
+      }
+    } catch (e) {
+      console.log(`[GenerateSolution] No problem context for: ${titleSlug} (using title only)`);
+    }
     
     // Build JSON-structured prompt for code generation
     const prompt = `You are an expert coding mentor.
@@ -1350,9 +1402,7 @@ app.post('/generate-solution', async (req, res) => {
 Problem: "${title}"
 Language: ${language}
 
-${codeSnippet ? `User's attempt:\n${codeSnippet}` : ''}
-
-Return ONLY valid JSON in this exact format:
+${problemSection ? `${problemSection}\n\n` : ''}${codeSnippet ? `User's attempt:\n${codeSnippet}\n\n` : ''}Return ONLY valid JSON in this exact format:
 {
   "optimal_solution": {
     "code": "<complete optimal solution code as a single string with \\n for newlines>",

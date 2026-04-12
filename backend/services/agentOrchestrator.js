@@ -18,6 +18,7 @@ import * as logger from './agentLogger.js';
 import * as confidenceTracker from './confidenceTracker.js';
 import { generateNextAction, generateAlerts, generateStrategyEvolution } from './nextActionGenerator.js';
 import { aggregateLLMInsights } from './codeAnalysisService.js';
+import { getProblemWithCache } from './problemService.js';
 import * as dbService from './dbService.js';
 
 // Agent loop stages
@@ -685,18 +686,38 @@ async function runEnhancedAgentPipeline(userId, sessionId) {
     }
 
     // Step 3: Build flat submissions array from docs (for agents)
+    // Enrich with problem tags from cache (no LLM calls)
     const flatSubmissions = [];
+    const problemCache = new Map(); // local dedup
     for (const doc of submissionDocs) {
+      // Fetch problem tags (cached, non-blocking)
+      let problemTags = doc.topics || doc.topicTags || [];
+      if (!problemCache.has(doc.titleSlug)) {
+        try {
+          const problem = await getProblemWithCache(doc.titleSlug);
+          if (problem?.tags?.length) {
+            problemTags = problem.tags;
+          }
+          problemCache.set(doc.titleSlug, { tags: problemTags, difficulty: problem?.difficulty || doc.difficulty });
+        } catch (e) {
+          problemCache.set(doc.titleSlug, { tags: problemTags, difficulty: doc.difficulty });
+        }
+      } else {
+        const cached = problemCache.get(doc.titleSlug);
+        problemTags = cached.tags;
+      }
+
       for (const sub of (doc.submissions || [])) {
         flatSubmissions.push({
           title: doc.title,
           titleSlug: doc.titleSlug,
-          difficulty: doc.difficulty,
+          difficulty: problemCache.get(doc.titleSlug)?.difficulty || doc.difficulty,
           status: sub.status,
           statusDisplay: sub.status,
           lang: sub.lang,
           timestamp: sub.timestamp,
-          code: sub.code
+          code: sub.code,
+          topicTags: problemTags  // Real LeetCode tags for agents
         });
       }
     }
