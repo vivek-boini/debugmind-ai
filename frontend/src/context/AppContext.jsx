@@ -217,7 +217,13 @@ export function AppProvider({ children }) {
         progress: userData.agentOutput?.monitoring,
         adaptation: userData.agentOutput?.adaptation,
         next_action: userData.agentOutput?.nextAction,
-        diagnosis: userData.agentOutput?.diagnosis
+        diagnosis: userData.agentOutput?.diagnosis,
+        // CRITICAL: Include agent_loop so Dashboard shows 'Completed' not 'Running'
+        agent_loop: {
+          current_stage: 'complete',
+          total_runs: 1,
+          stage_history: ['extracting', 'diagnosing', 'setting_goals', 'planning', 'monitoring', 'adapting', 'complete']
+        }
       };
       setAgentState(agentStateData);
 
@@ -501,6 +507,14 @@ export function AppProvider({ children }) {
 
     console.log('[AppContext] Starting polling for user:', user);
 
+    // Safety timeout: stop polling after 30 seconds max
+    const safetyTimeout = setTimeout(() => {
+      if (!dataFoundRef.current) {
+        console.log('[AppContext] Safety timeout reached (30s), stopping poll');
+        setIsPolling(false);
+      }
+    }, 30000);
+
     // Initial fetch
     fetchAgentState(user);
 
@@ -519,6 +533,7 @@ export function AppProvider({ children }) {
     return () => {
       console.log('[AppContext] Cleaning up polling interval');
       clearInterval(interval);
+      clearTimeout(safetyTimeout);
     };
   }, [user, isPolling, fetchAgentState]);
 
