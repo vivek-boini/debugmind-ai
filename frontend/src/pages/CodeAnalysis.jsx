@@ -182,6 +182,52 @@ function groupSubmissionsByProblem(submissions) {
   return result;
 }
 
+// Build analysis text from DB analysis object
+// Converts structured JSON (from GROQ) to text format for existing parseAnalysis()
+function buildAnalysisText(analysis) {
+  if (!analysis) return '';
+  
+  const parts = [];
+  
+  if (analysis.complexity) {
+    // Try to split "O(n) time, O(1) space" format
+    const timePart = analysis.complexity.match(/O\([^)]+\)\s*time/i);
+    const spacePart = analysis.complexity.match(/O\([^)]+\)\s*space/i);
+    if (timePart) parts.push(`**Time Complexity**: ${timePart[0]}`);
+    if (spacePart) parts.push(`**Space Complexity**: ${spacePart[0]}`);
+    if (!timePart && !spacePart) {
+      parts.push(`**Time Complexity**: ${analysis.complexity}`);
+    }
+  }
+  if (analysis.timeComplexity) parts.push(`**Time Complexity**: ${analysis.timeComplexity}`);
+  if (analysis.spaceComplexity) parts.push(`**Space Complexity**: ${analysis.spaceComplexity}`);
+  
+  if (analysis.mistakes && analysis.mistakes.length > 0) {
+    parts.push(`**What's Wrong**:`);
+    analysis.mistakes.forEach(m => parts.push(`- ${m}`));
+  }
+  
+  if (analysis.patterns && analysis.patterns.length > 0) {
+    parts.push(`**Mistake Pattern**:`);
+    analysis.patterns.forEach(p => parts.push(`- ${p}`));
+  }
+  
+  if (analysis.improvements && analysis.improvements.length > 0) {
+    parts.push(`**Improvements**:`);
+    analysis.improvements.forEach(i => parts.push(`- ${i}`));
+  }
+  
+  if (analysis.improvement) {
+    parts.push(`**Key Insight**: ${analysis.improvement}`);
+  }
+  
+  if (analysis.finalScore != null) {
+    parts.push(`**Score**: ${analysis.finalScore}/10`);
+  }
+  
+  return parts.join('\n') || 'Analysis data available but no details to display.';
+}
+
 // Normalize status values from various sources
 function normalizeStatus(status) {
   if (!status) return 'Other';
@@ -413,10 +459,154 @@ function InsightCard({ insight }) {
   );
 }
 
-// Structured Analysis Display - Main structured view
+// ============================================================================
+// DB ANALYSIS DISPLAY — Clean structured UI for LLM analysis from database
+// Renders {mistakes, patterns, complexity, improvement} as visual cards
+// ============================================================================
+
+function DBAnalysisDisplay({ dbAnalysis, analysis }) {
+  if (!dbAnalysis) return null;
+
+  const { mistakes, patterns, complexity, improvement } = dbAnalysis;
+
+  // Parse complexity string like "O(n) time, O(1) space"
+  let timeComplexity = null;
+  let spaceComplexity = null;
+  if (complexity) {
+    const timePart = complexity.match(/O\([^)]+\)\s*time/i);
+    const spacePart = complexity.match(/O\([^)]+\)\s*space/i);
+    if (timePart) timeComplexity = timePart[0];
+    if (spacePart) spaceComplexity = spacePart[0];
+    if (!timePart && !spacePart) timeComplexity = complexity;
+  }
+
+  const hasMistakes = mistakes && mistakes.length > 0;
+  const hasPatterns = patterns && patterns.length > 0;
+  const hasComplexity = timeComplexity || spaceComplexity;
+  const hasImprovement = improvement && improvement.length > 0;
+  const hasAnyData = hasMistakes || hasPatterns || hasComplexity || hasImprovement;
+
+  if (!hasAnyData) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-slate-500">
+        <Brain size={40} className="mb-3 text-slate-600" />
+        <p className="text-sm">Analysis data available but no details to display.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4 animate-fade-in">
+
+      {/* AI Generated Badge */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-emerald-500/10 border border-emerald-500/25 rounded-lg w-fit">
+        <Sparkles size={14} className="text-emerald-400" />
+        <span className="text-xs font-medium text-emerald-400">AI Analysis Generated</span>
+        {dbAnalysis.lastAnalyzedAt && (
+          <span className="text-xs text-emerald-400/60 ml-1">
+            • {new Date(dbAnalysis.lastAnalyzedAt).toLocaleDateString()}
+          </span>
+        )}
+      </div>
+
+      {/* Complexity Metrics */}
+      {hasComplexity && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {timeComplexity && (
+            <div className="flex items-center gap-3 px-4 py-3.5 rounded-xl border bg-blue-500/8 border-blue-500/25">
+              <div className="p-2 rounded-lg bg-blue-500/15">
+                <Clock size={18} className="text-blue-400" />
+              </div>
+              <div>
+                <p className="text-xs text-blue-400/70 font-medium">Time Complexity</p>
+                <p className="text-sm font-semibold text-blue-300 mt-0.5">{timeComplexity}</p>
+              </div>
+            </div>
+          )}
+          {spaceComplexity && (
+            <div className="flex items-center gap-3 px-4 py-3.5 rounded-xl border bg-purple-500/8 border-purple-500/25">
+              <div className="p-2 rounded-lg bg-purple-500/15">
+                <Layers size={18} className="text-purple-400" />
+              </div>
+              <div>
+                <p className="text-xs text-purple-400/70 font-medium">Space Complexity</p>
+                <p className="text-sm font-semibold text-purple-300 mt-0.5">{spaceComplexity}</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Mistakes */}
+      <div className="rounded-xl border p-5 bg-red-500/5 border-red-500/20">
+        <div className="flex items-center gap-2.5 mb-3">
+          <div className="p-1.5 rounded-lg bg-red-500/15">
+            <AlertTriangle size={16} className="text-red-400" />
+          </div>
+          <h4 className="font-semibold text-red-400">Mistakes Identified</h4>
+          {hasMistakes && (
+            <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-red-500/15 text-red-400/80">
+              {mistakes.length} found
+            </span>
+          )}
+        </div>
+        {hasMistakes ? (
+          <ul className="space-y-2.5">
+            {mistakes.map((mistake, i) => (
+              <li key={i} className="flex items-start gap-2.5 text-sm">
+                <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-red-400/60 shrink-0" />
+                <span className="text-slate-300 leading-relaxed">{mistake}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-slate-500 italic">No major mistakes detected. Nice work! 🎉</p>
+        )}
+      </div>
+
+      {/* Patterns */}
+      <div className="rounded-xl border p-5 bg-amber-500/5 border-amber-500/20">
+        <div className="flex items-center gap-2.5 mb-3">
+          <div className="p-1.5 rounded-lg bg-amber-500/15">
+            <Brain size={16} className="text-amber-400" />
+          </div>
+          <h4 className="font-semibold text-amber-400">Patterns Detected</h4>
+        </div>
+        {hasPatterns ? (
+          <div className="flex flex-wrap gap-2">
+            {patterns.map((pattern, i) => (
+              <span
+                key={i}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm bg-amber-500/10 border border-amber-500/25 text-amber-200 hover:bg-amber-500/15 transition-colors"
+              >
+                <Compass size={12} className="text-amber-400" />
+                {pattern}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500 italic">No specific patterns identified yet.</p>
+        )}
+      </div>
+
+      {/* Improvement Suggestion */}
+      {hasImprovement && (
+        <div className="rounded-xl border p-5 bg-gradient-to-r from-emerald-500/8 to-teal-500/8 border-emerald-500/25">
+          <div className="flex items-center gap-2.5 mb-3">
+            <div className="p-1.5 rounded-lg bg-emerald-500/15">
+              <Lightbulb size={16} className="text-emerald-400" />
+            </div>
+            <h4 className="font-semibold text-emerald-400">How to Improve</h4>
+          </div>
+          <p className="text-slate-300 leading-relaxed text-sm">{improvement}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Structured Analysis Display - Main structured view (legacy text-parsed)
 function StructuredAnalysisDisplay({ analysis, parsedAnalysis }) {
-  const [showRaw, setShowRaw] = useState(false);
-  
   // Use parsed data if available, fallback to analysis object
   const data = parsedAnalysis || {};
   const score = data.score || analysis.score;
@@ -490,24 +680,6 @@ function StructuredAnalysisDisplay({ analysis, parsedAnalysis }) {
 
       {/* Key Insight */}
       <InsightCard insight={insight} />
-
-      {/* Toggle Raw Text */}
-      {data.rawText && (
-        <div className="pt-4 border-t border-slate-800">
-          <button
-            onClick={() => setShowRaw(!showRaw)}
-            className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-300 transition-colors"
-          >
-            <ChevronRight size={14} className={`transition-transform ${showRaw ? 'rotate-90' : ''}`} />
-            {showRaw ? 'Hide' : 'Show'} raw AI response
-          </button>
-          {showRaw && (
-            <pre className="mt-3 p-4 bg-slate-900 rounded-lg text-xs text-slate-400 overflow-x-auto whitespace-pre-wrap">
-              {data.rawText}
-            </pre>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -717,9 +889,9 @@ function ComparativeAnalysisDisplay({
   onAnalyzeSingle,
   onGenerateSolution,
   generatedSolution,
-  loadingSolution
+  loadingSolution,
+  hasDBAnalysis
 }) {
-  const [showRaw, setShowRaw] = useState(false);
   const [activeTab, setActiveTab] = useState('journey'); // 'journey' or 'submissions'
   const [activeAttempt, setActiveAttempt] = useState(null); // FIX 3: Accordion state
   
@@ -832,29 +1004,31 @@ function ComparativeAnalysisDisplay({
             </div>
           )}
 
-          {/* Metrics Grid */}
-          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 animate-fade-in">
-            <MetricCard 
-              icon={Target} 
-              label="Final Score" 
-              value={data.score ? `${data.score}/10` : null}
-              colorClass={data.score ? getScoreColor(data.score) : 'bg-slate-800/50 border-slate-700 text-slate-400'}
-            />
-            <MetricCard 
-              icon={Clock} 
-              label="Time Complexity" 
-              value={data.timeComplexity}
-              colorClass="bg-blue-500/10 border-blue-500/30 text-blue-400"
-              isComplexity={true}
-            />
-            <MetricCard 
-              icon={Layers} 
-              label="Space Complexity" 
-              value={data.spaceComplexity}
-              colorClass="bg-purple-500/10 border-purple-500/30 text-purple-400"
-              isComplexity={true}
-            />
-          </div>
+          {/* Metrics Grid — skip if AI Insights already shows complexity */}
+          {!hasDBAnalysis && (
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 animate-fade-in">
+              <MetricCard 
+                icon={Target} 
+                label="Final Score" 
+                value={data.score ? `${data.score}/10` : null}
+                colorClass={data.score ? getScoreColor(data.score) : 'bg-slate-800/50 border-slate-700 text-slate-400'}
+              />
+              <MetricCard 
+                icon={Clock} 
+                label="Time Complexity" 
+                value={data.timeComplexity}
+                colorClass="bg-blue-500/10 border-blue-500/30 text-blue-400"
+                isComplexity={true}
+              />
+              <MetricCard 
+                icon={Layers} 
+                label="Space Complexity" 
+                value={data.spaceComplexity}
+                colorClass="bg-purple-500/10 border-purple-500/30 text-purple-400"
+                isComplexity={true}
+              />
+            </div>
+          )}
 
           {/* What Changed */}
           {data.whatChanged && data.whatChanged.length > 0 && (
@@ -866,8 +1040,8 @@ function ComparativeAnalysisDisplay({
             />
           )}
 
-          {/* Confidence Gaps - NEW */}
-          {data.confidenceGaps && data.confidenceGaps.length > 0 && (
+          {/* Confidence Gaps — skip if AI Insights already shows patterns */}
+          {!hasDBAnalysis && data.confidenceGaps && data.confidenceGaps.length > 0 && (
             <div className="p-5 bg-amber-500/5 rounded-xl border border-amber-500/20 animate-fade-in">
               <div className="flex items-center gap-2 mb-3">
                 <Brain size={18} className="text-amber-400" />
@@ -896,8 +1070,8 @@ function ComparativeAnalysisDisplay({
             />
           )}
 
-          {/* Mistake Pattern */}
-          {data.mistakePattern && data.mistakePattern.length > 0 && (
+          {/* Mistake Patterns — skip if AI Insights already shows mistakes */}
+          {!hasDBAnalysis && data.mistakePattern && data.mistakePattern.length > 0 && (
             <SectionCard 
               icon={RefreshCw}
               title="Repeated Mistake Patterns"
@@ -1265,23 +1439,6 @@ function ComparativeAnalysisDisplay({
         </div>
       )}
 
-      {/* Toggle Raw Text */}
-      {data.rawText && (
-        <div className="pt-4 border-t border-slate-800">
-          <button
-            onClick={() => setShowRaw(!showRaw)}
-            className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-300 transition-colors"
-          >
-            <ChevronRight size={14} className={`transition-transform ${showRaw ? 'rotate-90' : ''}`} />
-            {showRaw ? 'Hide' : 'Show'} raw AI response
-          </button>
-          {showRaw && (
-            <pre className="mt-3 p-4 bg-slate-900 rounded-lg text-xs text-slate-400 overflow-x-auto whitespace-pre-wrap animate-fade-in">
-              {data.rawText}
-            </pre>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -1441,11 +1598,41 @@ function LazyAnalysisDetail({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Parse the LLM analysis into structured data
+  // Check if we have direct DB analysis object (structured data, no regex needed)
+  const hasDBAnalysis = !!analysis.dbAnalysis;
+  
+  // Always parse text analysis for ComparativeAnalysisDisplay (journey, code, buttons)
   const parsedAnalysis = analysis.llmAnalysis ? parseAnalysis(analysis.llmAnalysis) : null;
   
   // Check if this is comparative analysis
   const isComparative = analysis.isComparative || (analysis.submissions && analysis.submissions.length > 1);
+
+  // Pending state
+  if (analysis.analysisSource === 'pending') {
+    return (
+      <div className="space-y-6 overflow-y-auto max-h-[calc(100vh-200px)] pr-2">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-bold text-white">{analysis.title}</h2>
+            {analysis.submissionCount && (
+              <p className="text-sm text-slate-400 mt-1">
+                {analysis.submissionCount} submission{analysis.submissionCount > 1 ? 's' : ''}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/20 mb-4">
+            <Clock size={32} className="text-amber-400" />
+          </div>
+          <h3 className="text-lg font-semibold text-white mb-2">Analysis Pending</h3>
+          <p className="text-sm text-slate-400 max-w-sm">
+            This problem will be automatically analyzed by AI during your next data extraction.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 overflow-y-auto max-h-[calc(100vh-200px)] pr-2">
@@ -1479,7 +1666,12 @@ function LazyAnalysisDetail({
         </div>
       </div>
 
-      {/* Use ComparativeAnalysisDisplay for all analyses */}
+      {/* AI Insights Section — shown ABOVE journey/code, not instead of it */}
+      {hasDBAnalysis && (
+        <DBAnalysisDisplay dbAnalysis={analysis.dbAnalysis} analysis={analysis} />
+      )}
+
+      {/* Journey, Submissions, Code Viewer, Optimized Code Button */}
       {parsedAnalysis ? (
         <ComparativeAnalysisDisplay 
           analysis={analysis} 
@@ -1488,26 +1680,22 @@ function LazyAnalysisDetail({
           onGenerateSolution={onGenerateSolution}
           generatedSolution={generatedSolutions?.[analysis.title]}
           loadingSolution={loadingSolution === analysis.title}
+          hasDBAnalysis={hasDBAnalysis}
         />
-      ) : (
-        /* Fallback to raw display if parsing failed */
-        <div className="p-6 bg-linear-to-r from-slate-800/80 to-slate-800/50 rounded-xl border border-slate-700">
-          <div className="flex items-center gap-2 mb-4">
-            <Lightbulb size={20} className="text-yellow-400" />
-            <h3 className="font-semibold text-white">AI Analysis</h3>
-          </div>
-          <div className="prose prose-invert prose-sm max-w-none">
-            <pre className="whitespace-pre-wrap text-slate-300 font-sans text-sm leading-relaxed">
-              {analysis.llmAnalysis}
-            </pre>
-          </div>
+      ) : !hasDBAnalysis && (
+        /* Fallback only if no DB analysis AND no parsed analysis */
+        <div className="flex flex-col items-center justify-center py-12 text-slate-500">
+          <Brain size={40} className="mb-3 text-slate-600" />
+          <p className="text-sm">No analysis details available.</p>
         </div>
       )}
 
       {/* Metadata */}
-      <div className="text-xs text-slate-500 pt-4 border-t border-slate-800">
-        Analyzed at: {analysis.analyzedAt ? new Date(analysis.analyzedAt).toLocaleString() : 'Just now'}
-      </div>
+      {analysis.analyzedAt && (
+        <div className="text-xs text-slate-500 pt-4 border-t border-slate-800">
+          Analyzed: {new Date(analysis.analyzedAt).toLocaleString()}
+        </div>
+      )}
     </div>
   );
 }
@@ -1515,15 +1703,17 @@ function LazyAnalysisDetail({
 // Main component
 export default function CodeAnalysis() {
   const { user, hasData } = useApp();
-  const [submissions, setSubmissions] = useState([]);  // Raw submissions list
+  // Store full submission docs (with analysis field from DB)
+  const [submissionDocs, setSubmissionDocs] = useState([]);
+  const [submissions, setSubmissions] = useState([]);  // Raw submissions list (flattened)
   const [selectedIndex, setSelectedIndex] = useState(null);
-  const [selectedProblemTitle, setSelectedProblemTitle] = useState(null);  // Track which problem group is selected
-  const [expandedProblems, setExpandedProblems] = useState({});  // Track expanded problem groups
+  const [selectedProblemTitle, setSelectedProblemTitle] = useState(null);
+  const [expandedProblems, setExpandedProblems] = useState({});
   const [loading, setLoading] = useState(true);
-  const [analyzing, setAnalyzing] = useState(false);  // For per-problem LLM analysis
+  const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState(null);
-  const [analysisCache, setAnalysisCache] = useState({});  // Cache LLM results
-  const [currentAnalysis, setCurrentAnalysis] = useState(null);  // Currently displayed analysis
+  const [analysisCache, setAnalysisCache] = useState({});
+  const [currentAnalysis, setCurrentAnalysis] = useState(null);
   
   // New state for solution generation
   const [generatedSolutions, setGeneratedSolutions] = useState({});
@@ -1538,9 +1728,9 @@ export default function CodeAnalysis() {
   const uniqueProblemsCount = groupedProblems.length;
   const totalSubmissionsCount = submissions.length;
 
-  // Fetch submissions list on page load (NO LLM calls)
+  // Fetch submissions from DB on page load (NO LLM calls)
+  // Uses /load-user-data which returns submissionDocs with analysis field
   useEffect(() => {
-    // Get user from context or localStorage
     const currentUser = user || localStorage.getItem('debugmind_user')?.toLowerCase();
     
     if (!currentUser) {
@@ -1555,24 +1745,69 @@ export default function CodeAnalysis() {
       try {
         console.log('[CodeAnalysis] Fetching submissions for:', currentUser);
         
-        // Fetch from agent-state endpoint
+        // Primary: Load from /load-user-data (includes submissionDocs with analysis)
+        const loadRes = await fetch(`${API_BASE_URL}/load-user-data/${currentUser}`);
+        if (loadRes.ok) {
+          const userData = await loadRes.json();
+          
+          if (userData.hasData && userData.submissionDocs?.length > 0) {
+            // Store full docs for analysis lookup
+            setSubmissionDocs(userData.submissionDocs);
+            
+            // Flatten into submissions array for the UI grouping logic
+            const flat = [];
+            for (const doc of userData.submissionDocs) {
+              for (const sub of (doc.submissions || [])) {
+                flat.push({
+                  title: doc.title,
+                  titleSlug: doc.titleSlug,
+                  difficulty: doc.difficulty,
+                  status: sub.status,
+                  statusDisplay: sub.status,
+                  lang: sub.lang,
+                  timestamp: sub.timestamp,
+                  code: sub.code,
+                  // Attach analysis from doc for quick access
+                  _analysis: doc.analysis
+                });
+              }
+            }
+            setSubmissions(flat);
+            
+            // Pre-populate analysis cache from DB data
+            const cache = {};
+            for (const doc of userData.submissionDocs) {
+              if (doc.analysis?.lastAnalyzedAt) {
+                cache[`problem:${doc.title}`] = {
+                  title: doc.title,
+                  dbAnalysis: doc.analysis,
+                  llmAnalysis: buildAnalysisText(doc.analysis),
+                  analysisSource: doc.analysis.source || 'llm',
+                  analyzedAt: doc.analysis.lastAnalyzedAt,
+                  submissions: (doc.submissions || []).map(s => ({
+                    ...s,
+                    title: doc.title,
+                    titleSlug: doc.titleSlug,
+                    difficulty: doc.difficulty
+                  }))
+                };
+              }
+            }
+            setAnalysisCache(cache);
+            console.log(`[CodeAnalysis] Loaded ${flat.length} submissions, ${Object.keys(cache).length} with analysis`);
+            setLoading(false);
+            return;
+          }
+        }
+        
+        // Fallback: try agent-state endpoint
         const res = await fetch(`${API_BASE_URL}/agent-state/${currentUser}`);
         const data = await res.json();
         
-        console.log('[CodeAnalysis] Response:', data.status, 'submissions:', data.submissions?.length || 0);
-        
-        if (data.status === 'ready' && data.submissions && data.submissions.length > 0) {
+        if (data.status === 'ready' && data.submissions?.length > 0) {
           setSubmissions(data.submissions);
-        } else if (data.status === 'no_data') {
-          // No data yet - that's okay, show empty state
-          setSubmissions([]);
         } else {
-          // Try code-analysis cache as fallback
-          const cacheRes = await fetch(`${API_BASE_URL}/code-analysis/${currentUser}`);
-          if (cacheRes.ok) {
-            const cacheData = await cacheRes.json();
-            setSubmissions(cacheData.submissions || []);
-          }
+          setSubmissions([]);
         }
       } catch (err) {
         console.error('[CodeAnalysis] Error fetching submissions:', err);
@@ -1591,7 +1826,7 @@ export default function CodeAnalysis() {
     handleProblemClick(problemTitle);
   };
 
-  // Handle problem click - analyze ALL submissions for this problem (COMPARATIVE ANALYSIS)
+  // Handle problem click — DB-driven (NO on-demand LLM calls)
   const handleProblemClick = async (problemTitle) => {
     const problem = groupedProblems.find(p => p.title === problemTitle);
     if (!problem) {
@@ -1599,9 +1834,7 @@ export default function CodeAnalysis() {
       return;
     }
 
-    // Safety check for submissions
     if (!problem.submissions || problem.submissions.length === 0) {
-      console.error('[CodeAnalysis] No submissions found for problem:', problemTitle);
       setCurrentAnalysis({
         title: problemTitle,
         submissions: [],
@@ -1611,79 +1844,60 @@ export default function CodeAnalysis() {
       return;
     }
 
-    console.log('[CodeAnalysis] Analyzing problem:', problemTitle, 'with', problem.submissions.length, 'submissions');
-    console.log('[CodeAnalysis] First submission keys:', Object.keys(problem.submissions[0] || {}));
-
     setSelectedProblemTitle(problemTitle);
-    setSelectedIndex(null); // Clear individual selection
+    setSelectedIndex(null);
     
-    // Expand the problem group
     setExpandedProblems(prev => ({
       ...prev,
       [problemTitle]: true
     }));
 
-    // Check cache first - cache by problem title (not submission)
+    // Check cache first (pre-populated from DB or from previous click)
     const cacheKey = `problem:${problemTitle}`;
     if (analysisCache[cacheKey]) {
-      setCurrentAnalysis(analysisCache[cacheKey]);
+      const cached = analysisCache[cacheKey];
+      setCurrentAnalysis({
+        ...cached,
+        title: problemTitle,
+        submissions: problem.submissions,
+        submissionCount: problem.submissions.length,
+        isComparative: problem.submissions.length > 1
+      });
       return;
     }
 
-    // Call LLM with ALL submissions for this problem
-    setAnalyzing(true);
-    setCurrentAnalysis(null);
-
-    try {
-      const res = await fetch(`${API_BASE_URL}/analyze-problem`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          submissions: problem.submissions  // Send ALL submissions
-        })
-      });
-
-      // Check for HTTP errors
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        console.error('[CodeAnalysis] API error:', res.status, errorData);
-        throw new Error(errorData.message || `HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-
+    // Check if we have analysis in submissionDocs (from DB)
+    const doc = submissionDocs.find(d => d.title === problemTitle);
+    if (doc?.analysis?.lastAnalyzedAt) {
       const analysisResult = {
         title: problemTitle,
         submissions: problem.submissions,
         submissionCount: problem.submissions.length,
-        isComparative: data.isComparative,
-        llmAnalysis: data.analysis,
-        analysisSource: data.source,
-        analyzedAt: new Date().toISOString()
+        isComparative: problem.submissions.length > 1,
+        dbAnalysis: doc.analysis,
+        llmAnalysis: buildAnalysisText(doc.analysis),
+        analysisSource: doc.analysis.source || 'llm',
+        analyzedAt: doc.analysis.lastAnalyzedAt
       };
 
       setCurrentAnalysis(analysisResult);
-
-      // Cache by problem title
-      setAnalysisCache(prev => ({
-        ...prev,
-        [cacheKey]: analysisResult
-      }));
-
-    } catch (err) {
-      console.error('[CodeAnalysis] Error analyzing problem:', err);
-      setCurrentAnalysis({
-        title: problemTitle,
-        submissions: problem.submissions,
-        llmAnalysis: 'Failed to analyze. Please try again.',
-        analysisSource: 'error'
-      });
-    } finally {
-      setAnalyzing(false);
+      setAnalysisCache(prev => ({ ...prev, [cacheKey]: analysisResult }));
+      return;
     }
+
+    // No analysis available yet — show pending message
+    setCurrentAnalysis({
+      title: problemTitle,
+      submissions: problem.submissions,
+      submissionCount: problem.submissions.length,
+      isComparative: problem.submissions.length > 1,
+      llmAnalysis: `Analysis pending.\n\nThis problem will be automatically analyzed during your next data extraction.\n\nSubmission count: ${problem.submissions.length}`,
+      analysisSource: 'pending',
+      analyzedAt: null
+    });
   };
 
-  // Handle single submission analysis (optional - for "Analyze Latest" button)
+  // Handle single submission analysis — DB-driven (no API call)
   const handleSingleSubmissionAnalysis = async (submission) => {
     const cacheKey = `single:${submission.id || submission.submissionId || submission.originalIndex}`;
     
@@ -1692,37 +1906,31 @@ export default function CodeAnalysis() {
       return;
     }
 
-    setAnalyzing(true);
-
-    try {
-      const res = await fetch(`${API_BASE_URL}/analyze-problem`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ problem: submission })  // Legacy single-submission format
-      });
-
-      const data = await res.json();
-
+    // Check if the submission has _analysis from DB
+    if (submission._analysis?.lastAnalyzedAt) {
       const analysisResult = {
         ...submission,
         submissionCount: 1,
         isComparative: false,
-        llmAnalysis: data.analysis,
-        analysisSource: data.source,
-        analyzedAt: new Date().toISOString()
+        dbAnalysis: submission._analysis,
+        llmAnalysis: buildAnalysisText(submission._analysis),
+        analysisSource: submission._analysis.source || 'llm',
+        analyzedAt: submission._analysis.lastAnalyzedAt
       };
 
       setCurrentAnalysis(analysisResult);
-      setAnalysisCache(prev => ({
-        ...prev,
-        [cacheKey]: analysisResult
-      }));
-
-    } catch (err) {
-      console.error('[CodeAnalysis] Error:', err);
-    } finally {
-      setAnalyzing(false);
+      setAnalysisCache(prev => ({ ...prev, [cacheKey]: analysisResult }));
+      return;
     }
+
+    // No analysis available
+    setCurrentAnalysis({
+      ...submission,
+      submissionCount: 1,
+      isComparative: false,
+      llmAnalysis: 'Analysis pending. This submission will be analyzed during your next extraction.',
+      analysisSource: 'pending'
+    });
   };
 
   // Handle generating optimal solution (separate from analysis)
@@ -1754,6 +1962,14 @@ export default function CodeAnalysis() {
       }
 
       const data = await res.json();
+
+      // Sanitize solution code — strip any markdown artifacts
+      if (data.solution) {
+        data.solution = data.solution
+          .replace(/```[\w]*/g, '')
+          .replace(/```/g, '')
+          .trim();
+      }
 
       setGeneratedSolutions(prev => ({
         ...prev,

@@ -267,7 +267,8 @@ function setGoals(input) {
     error_patterns = [], 
     confidence_level = 'medium',
     learning_velocity = {},
-    total_submissions = 0 
+    total_submissions = 0,
+    llm_mistakes = []  // Optional: from GROQ LLM analysis
   } = input;
 
   if (!weak_topics || weak_topics.length === 0) {
@@ -338,6 +339,46 @@ function setGoals(input) {
 
   // Sort by priority (highest first)
   goals.sort((a, b) => b.priority - a.priority);
+
+  // ============================================
+  // LLM-ENHANCED GOALS (optional, additive)
+  // Convert unique LLM mistakes into skill-improvement goals
+  // ============================================
+  if (llm_mistakes && llm_mistakes.length > 0) {
+    const existingTopics = new Set(goals.map(g => g.topic));
+    const uniqueMistakes = [...new Set(llm_mistakes)]
+      .filter(m => m && m.length > 5) // Filter out noise
+      .slice(0, 3); // Max 3 LLM-derived goals
+
+    for (const mistake of uniqueMistakes) {
+      // Don't add if we already have a goal covering this topic area
+      const alreadyCovered = [...existingTopics].some(topic =>
+        mistake.toLowerCase().includes(topic.toLowerCase().split(' ')[0])
+      );
+      if (alreadyCovered) continue;
+
+      goals.push({
+        id: `goal_llm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        topic: 'AI-Identified Skill Gap',
+        description: `Address: ${mistake}`,
+        description_parts: { main: mistake, error_focus: '', confidence_focus: '', full: mistake },
+        current_score: 50,
+        target_score: 75,
+        deadline_days: 7,
+        deadline_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        severity: 'medium',
+        priority: 10, // Lower priority than rule-based goals
+        milestones: [],
+        related_errors: [],
+        trend: 'unknown',
+        strategy: mistake,
+        metrics: { gap: 25, improvement_rate_needed: 3.6, problems_to_solve: 5 },
+        status: 'active',
+        source: 'llm',
+        created_at: new Date().toISOString()
+      });
+    }
+  }
 
   // Assign rank
   goals.forEach((goal, index) => {

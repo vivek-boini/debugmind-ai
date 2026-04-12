@@ -17,6 +17,8 @@ import * as memory from './memoryStore.js';
 import * as logger from './agentLogger.js';
 import * as confidenceTracker from './confidenceTracker.js';
 import { generateNextAction, generateAlerts, generateStrategyEvolution } from './nextActionGenerator.js';
+import { aggregateLLMInsights } from './codeAnalysisService.js';
+import * as dbService from './dbService.js';
 
 // Agent loop stages
 const STAGES = {
@@ -650,11 +652,148 @@ function getConfidenceHistory(userId, topic = null) {
   return confidenceTracker.getHistory(userId, { topic });
 }
 
+/**
+ * Run LLM-enhanced agent pipeline (async, non-blocking)
+ * Called AFTER runLLMAnalysis completes in the background
+ * 
+ * 1. Fetches submission docs with LLM analysis from DB
+ * 2. Aggregates LLM insights into llmSummary
+ * 3. Re-runs agent pipeline with enriched data
+ * 4. UPSERTs result to AgentOutput (overwrites previous for same session)
+ * 5. Updates in-memory store for /agent-state
+ */
+async function runEnhancedAgentPipeline(userId, sessionId) {
+  const sanitizedUserId = userId.toLowerCase().trim();
+  console.log(`[EnhancedPipeline] Starting for ${sanitizedUserId}, session: ${sessionId}`);
+
+  try {
+    // Step 1: Fetch all submission docs (now includes LLM analysis)
+    const submissionDocs = await dbService.getAllUserSubmissions(sanitizedUserId);
+    if (!submissionDocs || submissionDocs.length === 0) {
+      console.log('[EnhancedPipeline] No submissions found, skipping');
+      return null;
+    }
+
+    // Step 2: Aggregate LLM insights
+    const llmSummary = aggregateLLMInsights(submissionDocs);
+    console.log(`[EnhancedPipeline] LLM Summary: ${llmSummary.analyzedCount} problems analyzed`);
+
+    // If no LLM analysis was done, skip re-run
+    if (llmSummary.analyzedCount === 0) {
+      console.log('[EnhancedPipeline] No LLM analysis found, skipping re-run');
+      return null;
+    }
+
+    // Step 3: Build flat submissions array from docs (for agents)
+    const flatSubmissions = [];
+    for (const doc of submissionDocs) {
+      for (const sub of (doc.submissions || [])) {
+        flatSubmissions.push({
+          title: doc.title,
+          titleSlug: doc.titleSlug,
+          difficulty: doc.difficulty,
+          status: sub.status,
+          statusDisplay: sub.status,
+          lang: sub.lang,
+          timestamp: sub.timestamp,
+          code: sub.code
+        });
+      }
+    }
+
+    if (flatSubmissions.length === 0) {
+      console.log('[EnhancedPipeline] No flat submissions, skipping');
+      return null;
+    }
+
+    // Step 4: Re-run agent loop with LLM-enriched data
+    // Pass llm_analysis to diagnosis for enhanced weak topic detection
+    const diagnosis = agents.diagnose({
+      submissions: flatSubmissions,
+      llm_analysis: llmSummary
+    });
+    memory.storeDiagnosis(sanitizedUserId, diagnosis);
+
+    const goalsResult = agents.setGoals({
+      weak_topics: diagnosis.weak_topics,
+      confidence_scores: diagnosis.confidence_scores,
+      error_patterns: diagnosis.error_patterns,
+      confidence_level: diagnosis.confidence_level,
+      learning_velocity: diagnosis.learning_velocity,
+      total_submissions: diagnosis.total_submissions,
+      llm_mistakes: llmSummary.commonMistakes
+    });
+    memory.storeGoals(sanitizedUserId, goalsResult.goals);
+
+    const plan = agents.createPlan({
+      goals: goalsResult.goals,
+      diagnosis: diagnosis,
+      error_patterns: diagnosis.error_patterns,
+      confidence_level: diagnosis.confidence_level,
+      learning_velocity: diagnosis.learning_velocity
+    });
+    memory.storePlan(sanitizedUserId, plan);
+
+    const state = memory.getState(sanitizedUserId);
+    const monitoring = agents.monitor({
+      new_submissions: flatSubmissions,
+      previous_progress: state.current_progress,
+      goals: goalsResult.goals,
+      classifyProblem: agents.classifyProblem
+    });
+    memory.storeProgress(sanitizedUserId, monitoring);
+
+    const adaptation = agents.adapt({
+      monitoring_result: monitoring,
+      current_plan: plan,
+      goals: goalsResult.goals,
+      diagnosis: diagnosis
+    });
+    memory.storeAdaptation(sanitizedUserId, adaptation);
+    memory.updateAgentStage(sanitizedUserId, STAGES.COMPLETE);
+
+    // Step 5: Build enriched result and UPSERT to DB
+    const enrichedResult = {
+      diagnosis,
+      goals: goalsResult.goals,
+      plan,
+      monitoring,
+      adaptation,
+      llmSummary,
+      decisions: [],
+      status: 'completed'
+    };
+
+    // UPSERT to AgentOutput (overwrites previous for same session)
+    const savedOutput = await dbService.storeAgentOutput(sanitizedUserId, sessionId, enrichedResult);
+    console.log(`[AgentOutput] ${savedOutput ? '✓ Saved' : '✗ Failed to save'} enhanced output for session: ${sessionId}`);
+
+    // Log the decision
+    logger.logDecision(sanitizedUserId, {
+      agent: 'enhancedPipeline',
+      decision: 'llm_enhanced_rerun',
+      reason: `Re-ran pipeline with ${llmSummary.analyzedCount} LLM-analyzed problems. Found ${llmSummary.commonMistakes.length} common mistakes, ${llmSummary.weakPatterns.length} patterns.`,
+      confidence: 0.9,
+      input_summary: `${flatSubmissions.length} submissions, ${llmSummary.analyzedCount} with LLM analysis`,
+      output_summary: `Goals: ${goalsResult.goals.length}, Plan days: ${plan?.plan?.length || 0}`
+    });
+
+    console.log(`[AgentPipeline] ✓ Completed enhanced pipeline for ${sanitizedUserId}`);
+    return enrichedResult;
+
+  } catch (error) {
+    console.error('[AgentPipeline] Error:', error.message);
+    console.error('[AgentPipeline] Stack:', error.stack);
+    return null;
+  }
+}
+
 export {
   STAGES,
   STAGE_DESCRIPTIONS,
   runFullLoop,
   runIncrementalUpdate,
+  runEnhancedAgentPipeline,
   reDiagnose,
   getAgentState,
   getTodaysPlan,

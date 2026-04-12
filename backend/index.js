@@ -179,18 +179,45 @@ app.post('/extract', async (req, res) => {
     // Wait for session to be created (if DB is available)
     const session = await sessionPromise;
     
-    // Persist all data to MongoDB in background (NON-BLOCKING)
+    // Persist all data to MongoDB — MUST complete before LLM pipeline
     // This includes: submissions, agent outputs, goals, progress, actions
     if (session) {
-      dbService.persistExtractData(sanitizedUsername, submissions, loopResult, session.sessionId)
-        .then(result => {
-          if (result) {
-            console.log(`[Extract] Data persistence initiated for session: ${result.sessionId}`);
+      const capturedSessionId = session.sessionId;
+
+      // AWAIT persistence so submissions are in DB before LLM queries them
+      try {
+        const persistResult = await dbService.persistExtractData(sanitizedUsername, submissions, loopResult, capturedSessionId);
+        if (persistResult) {
+          console.log(`[Extract] ✓ Data persisted for session: ${persistResult.sessionId}`);
+        }
+      } catch (err) {
+        console.error('[Extract] Persistence failed:', err.message);
+      }
+
+      // ============================================
+      // ASYNC LLM PIPELINE (fire-and-forget, NON-BLOCKING)
+      // Runs AFTER DB persistence is COMPLETE
+      // Flow: LLM analysis → re-run agents with enriched data → UPSERT AgentOutput
+      // ============================================
+      process.nextTick(async () => {
+        try {
+          console.log(`[AsyncPipeline] Starting for ${sanitizedUsername}`);
+          
+          // Step 1: Run LLM analysis on recent problems
+          const llmResult = await codeAnalysisService.runLLMAnalysis(sanitizedUsername);
+          console.log(`[AsyncPipeline] LLM analysis: ${llmResult.analyzed} analyzed, ${llmResult.skipped} skipped, ${llmResult.errors} errors`);
+          
+          // Step 2: Re-run agent pipeline with LLM-enriched data (UPSERTS to DB)
+          if (llmResult.analyzed > 0) {
+            await orchestrator.runEnhancedAgentPipeline(sanitizedUsername, capturedSessionId);
+            console.log(`[AsyncPipeline] ✓ Enhanced pipeline complete for ${sanitizedUsername}`);
+          } else {
+            console.log(`[AsyncPipeline] No new analyses — skipping enhanced pipeline`);
           }
-        })
-        .catch(err => {
-          console.error('[Extract] Background persistence failed:', err.message);
-        });
+        } catch (err) {
+          console.error('[AsyncPipeline] Error (non-fatal):', err.message);
+        }
+      });
     }
 
     // Response format unchanged - backward compatible
@@ -219,96 +246,86 @@ app.post('/extract', async (req, res) => {
 
 /**
  * POST /code-analysis
- * Deep AI-powered analysis of LeetCode submissions using Gemini
+ * DEPRECATED — LLM analysis now runs automatically during /extract
+ * Kept for backward compat: returns deprecation message instead of crashing
  */
 app.post('/code-analysis', async (req, res) => {
-  const { username, submissions, forceRefresh } = req.body || {};
-
+  console.warn('[DEPRECATED] POST /code-analysis called — LLM analysis now runs automatically during /extract.');
+  
+  const { username } = req.body || {};
   if (!username) {
-    return res.status(400).json({
-      error: 'Invalid request',
-      message: 'Username is required'
-    });
+    return res.status(400).json({ error: 'Username is required' });
   }
 
   const sanitizedUsername = username.toLowerCase().trim();
-  console.log(`[CodeAnalysis] Request for user: ${sanitizedUsername}`);
 
+  // Try to return existing analysis from DB instead of crashing
   try {
-    // If no submissions provided, try to get from memory store
-    let subsToAnalyze = submissions;
-    if (!subsToAnalyze || subsToAnalyze.length === 0) {
-      const state = memory.getState(sanitizedUsername);
-      subsToAnalyze = state.submissions || [];
-    }
-
-    if (!subsToAnalyze || subsToAnalyze.length === 0) {
-      // Check if we have cached results
-      const cached = codeAnalysisService.getCached(sanitizedUsername);
-      if (cached) {
-        return res.json({
-          status: 'success',
-          source: 'cache',
-          ...cached
-        });
-      }
-
-      return res.status(400).json({
-        error: 'No submissions',
-        message: 'No submissions found to analyze. Extract data first.'
+    const submissions = await dbService.getAllUserSubmissions(sanitizedUsername);
+    if (submissions && submissions.length > 0) {
+      const analyzed = submissions.filter(s => s.analysis?.lastAnalyzedAt);
+      return res.json({
+        status: 'success',
+        source: 'db',
+        deprecated: true,
+        message: 'This endpoint is deprecated. Analysis runs automatically during /extract.',
+        submissions: analyzed.map(s => ({
+          title: s.title,
+          titleSlug: s.titleSlug,
+          difficulty: s.difficulty,
+          analysis: s.analysis
+        })),
+        totalAnalyzed: analyzed.length,
+        totalSubmissions: submissions.length
       });
     }
 
-    // Analyze submissions (uses cache if available)
-    const results = await codeAnalysisService.getOrAnalyze(
-      sanitizedUsername,
-      subsToAnalyze,
-      forceRefresh === true
-    );
-
-    res.json({
+    return res.json({
       status: 'success',
-      source: forceRefresh ? 'fresh' : 'analyzed',
-      ...results
+      deprecated: true,
+      message: 'No analysis found. Extract data first via /extract — LLM analysis runs automatically.',
+      submissions: [],
+      totalAnalyzed: 0
     });
-
   } catch (error) {
-    console.error('[CodeAnalysis] Error:', error);
-    
-    // Return a helpful error message
-    if (error.message.includes('NVIDIA_API_KEY')) {
-      return res.status(500).json({
-        error: 'Configuration error',
-        message: 'NVIDIA API key is not configured. Set NVIDIA_API_KEY environment variable.'
-      });
-    }
-
-    res.status(500).json({
-      error: 'Analysis failed',
-      message: error.message || 'Failed to analyze submissions'
-    });
+    console.error('[CodeAnalysis] Error:', error.message);
+    res.status(500).json({ error: 'Analysis lookup failed', message: error.message });
   }
 });
 
 /**
  * GET /code-analysis/:userId
- * Get cached code analysis for a user (no new API call)
+ * DEPRECATED — Returns analysis from DB submissions instead of old cache
  */
-app.get('/code-analysis/:userId', validateUserId, (req, res) => {
-  const cached = codeAnalysisService.getCached(req.userId);
+app.get('/code-analysis/:userId', validateUserId, async (req, res) => {
+  console.warn('[DEPRECATED] GET /code-analysis/:userId called — use /load-user-data/:userId instead.');
   
-  if (!cached) {
-    return res.status(404).json({
-      status: 'not_found',
-      message: 'No analysis found. Run POST /code-analysis first.'
-    });
-  }
+  try {
+    const submissions = await dbService.getAllUserSubmissions(req.userId);
+    const analyzed = (submissions || []).filter(s => s.analysis?.lastAnalyzedAt);
+    
+    if (analyzed.length === 0) {
+      return res.status(404).json({
+        status: 'not_found',
+        message: 'No analysis found. Extract data via /extract — analysis runs automatically.'
+      });
+    }
 
-  res.json({
-    status: 'success',
-    source: 'cache',
-    ...cached
-  });
+    res.json({
+      status: 'success',
+      source: 'db',
+      deprecated: true,
+      submissions: analyzed.map(s => ({
+        title: s.title,
+        titleSlug: s.titleSlug,
+        difficulty: s.difficulty,
+        analysis: s.analysis
+      })),
+      totalAnalyzed: analyzed.length
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch analysis', message: error.message });
+  }
 });
 
 /**
@@ -1140,6 +1157,7 @@ app.get('/debug-cache', (req, res) => {
  * Called when user clicks on a grouped problem
  */
 app.post('/analyze-problem', async (req, res) => {
+  console.warn('[DEPRECATED] POST /analyze-problem - LLM analysis now runs automatically during /extract. This endpoint will be removed in a future version.');
   try {
     const { submissions, problem } = req.body;
 
@@ -1326,25 +1344,37 @@ app.post('/generate-solution', async (req, res) => {
     const language = latest.lang || latest.language || 'Python';
     const title = problemTitle || latest.title || 'Problem';
     
-    // Build focused prompt for code generation
+    // Build JSON-structured prompt for code generation
     const prompt = `You are an expert coding mentor.
 
 Problem: "${title}"
 Language: ${language}
 
-${codeSnippet ? `User's attempt:\n\`\`\`${language}\n${codeSnippet}\n\`\`\`` : ''}
+${codeSnippet ? `User's attempt:\n${codeSnippet}` : ''}
 
-Generate:
-1. **Optimal Solution**: Clean, efficient code (10-15 lines max) in ${language}
-2. **Time Complexity**: Big-O notation with brief explanation
-3. **Space Complexity**: Big-O notation with brief explanation  
-4. **Explanation**: 2-3 sentences explaining the approach
+Return ONLY valid JSON in this exact format:
+{
+  "optimal_solution": {
+    "code": "<complete optimal solution code as a single string with \\n for newlines>",
+    "time_complexity": "O(...)",
+    "space_complexity": "O(...)",
+    "explanation": "2-3 sentences explaining the approach"
+  }
+}
 
-Format the code in a code block.`;
+RULES:
+- The "code" field must contain the COMPLETE solution function in ${language}
+- Use \\n for newlines inside the code string
+- Must be syntactically correct and include return statements
+- No markdown, no backticks, no extra text outside the JSON
+- Keep code clean and efficient (10-20 lines max)`;
 
     let llmResult;
     try {
-      llmResult = await llmService.generateLLMInsights(prompt);
+      llmResult = await llmService.generateLLMInsights(prompt, {
+        maxTokens: 1024,
+        temperature: 0.3
+      });
     } catch (llmError) {
       console.error('[GenerateSolution] LLM error:', llmError.message);
       return res.json({
@@ -1364,24 +1394,68 @@ Format the code in a code block.`;
       });
     }
     
-    // Extract code block from response
-    const text = llmResult.text;
-    const codeMatch = text.match(/```[\w]*\n?([\s\S]*?)```/);
-    const solution = codeMatch ? codeMatch[1].trim() : null;
-    
-    // Extract explanation (everything after code block or full text if no code)
+    // --- ROBUST PARSING with multiple fallback strategies ---
+    const rawText = llmResult.text;
+    let solution = null;
     let explanation = '';
-    if (codeMatch) {
-      const afterCode = text.substring(text.indexOf(codeMatch[0]) + codeMatch[0].length);
-      explanation = afterCode.trim().substring(0, 500);
-    } else {
-      explanation = text.substring(0, 500);
+    let timeComplexity = '';
+    let spaceComplexity = '';
+    
+    // Strategy 1: Parse as JSON (expected path with json_object mode)
+    try {
+      const parsed = JSON.parse(rawText);
+      const sol = parsed.optimal_solution || parsed;
+      solution = sol.code || sol.solution || null;
+      explanation = sol.explanation || '';
+      timeComplexity = sol.time_complexity || '';
+      spaceComplexity = sol.space_complexity || '';
+      console.log('[GenerateSolution] Parsed JSON successfully');
+    } catch (e) {
+      console.log('[GenerateSolution] JSON parse failed, trying fallbacks');
     }
+    
+    // Strategy 2: Extract code block from markdown (if LLM ignored json mode)
+    if (!solution) {
+      const codeMatch = rawText.match(/```[\w]*\n?([\s\S]*?)```/);
+      if (codeMatch) {
+        solution = codeMatch[1].trim();
+        // Extract explanation from remaining text
+        const afterCode = rawText.substring(rawText.indexOf(codeMatch[0]) + codeMatch[0].length);
+        explanation = afterCode.replace(/\*\*/g, '').trim().substring(0, 500);
+        console.log('[GenerateSolution] Extracted from code block');
+      }
+    }
+    
+    // Strategy 3: Look for function definition in raw text
+    if (!solution) {
+      const funcMatch = rawText.match(/((?:def |class |function |var |const |let |public )[\s\S]*)/);
+      if (funcMatch) {
+        solution = funcMatch[1].trim();
+        console.log('[GenerateSolution] Extracted function from raw text');
+      }
+    }
+    
+    // --- CLEAN the code ---
+    if (solution) {
+      solution = solution
+        .replace(/```[\w]*/g, '')   // Remove any remaining markdown code fences
+        .replace(/```/g, '')
+        .replace(/^[\s]*\n/, '')     // Remove leading blank lines
+        .replace(/\n[\s]*$/, '')     // Remove trailing blank lines
+        .trim();
+    }
+    
+    // Build explanation string with complexity info
+    const parts = [];
+    if (timeComplexity) parts.push(`Time Complexity: ${timeComplexity}`);
+    if (spaceComplexity) parts.push(`Space Complexity: ${spaceComplexity}`);
+    if (explanation) parts.push(explanation);
+    const fullExplanation = parts.join('. ').trim();
     
     res.json({
       success: true,
       solution,
-      explanation,
+      explanation: fullExplanation || null,
       language
     });
     

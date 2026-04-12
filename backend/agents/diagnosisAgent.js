@@ -266,6 +266,50 @@ function diagnose(input) {
   // Calculate learning velocity
   const learning_velocity = calculateLearningVelocity(timelineData);
 
+  // ============================================
+  // LLM-ENHANCED TOPIC DETECTION (optional, additive)
+  // If llm_analysis is provided, merge any LLM-detected topics
+  // that the rule-based system didn't flag
+  // ============================================
+  const llm_analysis = input.llm_analysis;
+  if (llm_analysis && llm_analysis.analyzedCount > 0) {
+    const existingTopics = new Set(weak_topics.map(wt => wt.topic));
+    
+    // Check LLM mistakes/patterns for topic references
+    const llmMentions = [
+      ...(llm_analysis.commonMistakes || []),
+      ...(llm_analysis.weakPatterns || [])
+    ].join(' ').toLowerCase();
+
+    for (const [topic] of Object.entries(TOPIC_KEYWORDS)) {
+      // Skip if already in weak_topics
+      if (existingTopics.has(topic)) continue;
+      
+      // Check if LLM mentions this topic
+      const topicLower = topic.toLowerCase();
+      if (llmMentions.includes(topicLower) || 
+          llmMentions.includes(topicLower.split(' ')[0])) {
+        // Add as lower-priority LLM-discovered weak topic
+        weak_topics.push({
+          topic,
+          score: 60, // Borderline score since rule-based didn't flag it
+          confidence: 60,
+          severity: 'medium',
+          evidence: ['Identified by AI analysis of your submissions'],
+          problem_count: 0,
+          failed_count: 0,
+          dominant_error: null,
+          trend: 'unknown',
+          strategy: `Review ${topic} patterns identified by AI analysis`,
+          source: 'llm' // Mark as LLM-detected
+        });
+      }
+    }
+
+    // Re-sort after adding LLM topics
+    weak_topics.sort((a, b) => a.score - b.score);
+  }
+
   return {
     weak_topics,
     error_patterns,

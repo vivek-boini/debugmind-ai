@@ -1,24 +1,33 @@
 /**
  * LLM Service
- * Provides optional LLM-based insights using NVIDIA API
+ * Provides optional LLM-based insights using GROQ API
  * 
  * Features:
  * - Safe fallback if LLM fails (never crashes the system)
- * - Uses NVIDIA's meta/llama-3.3-70b-instruct model
- * - NO strict JSON parsing - always returns raw text
+ * - Uses GROQ's llama-3.1-8b-instant model (fast, free-tier friendly)
+ * - Supports JSON mode for structured output
  * - Fallback ONLY if API call fails
+ * 
+ * Migration: Switched from NVIDIA API to GROQ API
  */
 
 import axios from "axios";
 
 // Model configuration
-const MODEL_NAME = "meta/llama-3.3-70b-instruct";
-const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+const MODEL_NAME = "llama-3.1-8b-instant";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const DEFAULT_CONFIG = {
-  temperature: 0.4,
-  maxTokens: 400,  // Reduced for faster response
+  temperature: 0.3,
+  maxTokens: 500,
   timeout: 15000,  // 15 second timeout
 };
+
+/**
+ * Get the API key (GROQ preferred, NVIDIA as fallback)
+ */
+function getApiKey() {
+  return process.env.GROQ_API_KEY || process.env.NVIDIA_API_KEY || null;
+}
 
 /**
  * Generate LLM insights - ALWAYS returns text if API succeeds
@@ -27,9 +36,11 @@ const DEFAULT_CONFIG = {
  * @returns {Promise<{success: boolean, text: string|null, error?: string}>}
  */
 export async function generateLLMInsights(prompt, options = {}) {
+  const apiKey = getApiKey();
+
   // Check if API key is available
-  if (!process.env.NVIDIA_API_KEY) {
-    console.log("[LLMService] No NVIDIA_API_KEY configured, skipping LLM");
+  if (!apiKey) {
+    console.log("[LLMService] No GROQ_API_KEY or NVIDIA_API_KEY configured, skipping LLM");
     return {
       success: false,
       text: null,
@@ -38,26 +49,33 @@ export async function generateLLMInsights(prompt, options = {}) {
   }
 
   try {
+    const requestBody = {
+      model: options.model || MODEL_NAME,
+      messages: [
+        {
+          role: "system",
+          content: options.systemPrompt || "You are an expert coding mentor. Respond ONLY in valid JSON.",
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+      max_tokens: options.maxTokens ?? DEFAULT_CONFIG.maxTokens,
+      temperature: options.temperature ?? DEFAULT_CONFIG.temperature,
+    };
+
+    // Enable JSON mode if requested
+    if (options.jsonMode !== false) {
+      requestBody.response_format = { type: "json_object" };
+    }
+
     const response = await axios.post(
-      NVIDIA_API_URL,
-      {
-        model: options.model || MODEL_NAME,
-        messages: [
-          {
-            role: "system",
-            content: options.systemPrompt || "You are an expert coding mentor.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        max_tokens: options.maxTokens ?? DEFAULT_CONFIG.maxTokens,
-        temperature: options.temperature ?? DEFAULT_CONFIG.temperature,
-      },
+      GROQ_API_URL,
+      requestBody,
       {
         headers: {
-          Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
+          Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
         },
         timeout: options.timeout ?? DEFAULT_CONFIG.timeout,
@@ -67,7 +85,7 @@ export async function generateLLMInsights(prompt, options = {}) {
     const text = response.data?.choices?.[0]?.message?.content;
 
     if (!text) {
-      console.log("[LLMService] Empty response from NVIDIA LLM");
+      console.log("[LLMService] Empty response from GROQ LLM");
       return {
         success: false,
         text: null,
@@ -75,32 +93,39 @@ export async function generateLLMInsights(prompt, options = {}) {
       };
     }
 
-    console.log("[LLMService] LLM response received successfully");
+    console.log("[LLMService] GROQ LLM response received successfully");
     return {
       success: true,
       text: text,
     };
   } catch (error) {
-    console.log("[LLMService] NVIDIA LLM failed:", error.response?.data || error.message);
+    const errMsg = error.response?.data?.error?.message || error.message;
+    console.log("[LLMService] GROQ LLM failed:", errMsg);
     return {
       success: false,
       text: null,
-      error: error.response?.data?.error?.message || error.message,
+      error: errMsg,
     };
   }
 }
 
 /**
- * Optional: Try to parse JSON from text (non-blocking)
- * Returns null if parsing fails - NEVER causes fallback
+ * Parse JSON from LLM text safely
+ * Returns null if parsing fails - NEVER causes errors
  */
 export function tryParseJSON(text) {
   if (!text) return null;
   try {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
+    // Try direct parse first (GROQ JSON mode usually returns clean JSON)
+    return JSON.parse(text);
   } catch {
-    // Silently fail - this is optional
+    // Fallback: extract JSON object from text
+    try {
+      const match = text.match(/\{[\s\S]*\}/);
+      if (match) return JSON.parse(match[0]);
+    } catch {
+      // Silently fail - this is optional
+    }
   }
   return null;
 }
@@ -110,7 +135,7 @@ export function tryParseJSON(text) {
  * @returns {boolean}
  */
 export function isAvailable() {
-  return !!process.env.NVIDIA_API_KEY;
+  return !!getApiKey();
 }
 
 export { MODEL_NAME };

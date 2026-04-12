@@ -442,13 +442,15 @@ const submissionSchema = new mongoose.Schema({
   },
   // LLM Analysis results (LLM-only - no fallback)
   analysis: {
-    source: { type: String, enum: ['llm', 'none'], default: 'llm' }, // Always "llm"
+    source: { type: String, enum: ['llm', 'none'], default: 'none' },
     finalScore: { type: Number, min: 0, max: 100 },
     timeComplexity: String,
     spaceComplexity: String,
+    complexity: String,       // Combined complexity string from GROQ
     mistakes: [String],
     improvements: [String],
     patterns: [String],
+    improvement: String,      // Single improvement suggestion from GROQ
     lastAnalyzedAt: Date
   }
 }, { timestamps: true });
@@ -597,15 +599,19 @@ submissionSchema.statics.upsertAnalysis = async function(userId, titleSlug, anal
   const normalizedSlug = titleSlug.toLowerCase().trim();
   
   const update = {
-    'analysis.source': analysisData.source || 'llm', // Always LLM
-    'analysis.finalScore': analysisData.finalScore,
-    'analysis.timeComplexity': analysisData.timeComplexity,
-    'analysis.spaceComplexity': analysisData.spaceComplexity,
+    'analysis.source': analysisData.source || 'llm',
     'analysis.mistakes': analysisData.mistakes || [],
-    'analysis.improvements': analysisData.improvements || [],
     'analysis.patterns': analysisData.patterns || [],
-    'analysis.lastAnalyzedAt': new Date()
+    'analysis.complexity': analysisData.complexity || '',
+    'analysis.improvement': analysisData.improvement || '',
+    'analysis.lastAnalyzedAt': analysisData.lastAnalyzedAt || new Date()
   };
+
+  // Also set legacy fields if provided
+  if (analysisData.finalScore != null) update['analysis.finalScore'] = analysisData.finalScore;
+  if (analysisData.timeComplexity) update['analysis.timeComplexity'] = analysisData.timeComplexity;
+  if (analysisData.spaceComplexity) update['analysis.spaceComplexity'] = analysisData.spaceComplexity;
+  if (analysisData.improvements) update['analysis.improvements'] = analysisData.improvements;
   
   const result = await this.findOneAndUpdate(
     { userId: normalizedUserId, titleSlug: normalizedSlug },
@@ -639,53 +645,18 @@ const agentOutputSchema = new mongoose.Schema({
     required: true,
     index: true
   },
-  diagnosis: {
-    weak_topics: [{
-      topic: String,
-      score: Number,
-      evidence: [String],
-      submissions_count: Number
-    }],
-    overall_success_rate: Number,
-    total_submissions: Number,
-    total_problems: Number,
-    confidence_scores: mongoose.Schema.Types.Mixed,
-    error_patterns: mongoose.Schema.Types.Mixed,
-    timestamp: Date
-  },
-  goals: [{
-    topic: String,
-    current_score: Number,
-    target_score: Number,
-    priority: Number,
-    timeframe: String,
-    actions: [String]
-  }],
-  plan: {
-    summary: String,
-    duration_days: Number,
-    current_day: Number,
-    plan: [{
-      day: Number,
-      focus: String,
-      items: [{
-        type: String,
-        topic: String,
-        problems: [mongoose.Schema.Types.Mixed],
-        duration: String
-      }]
-    }]
-  },
-  monitoring: {
-    metrics: mongoose.Schema.Types.Mixed,
-    trends: mongoose.Schema.Types.Mixed,
-    alerts: [String]
-  },
-  adaptation: {
-    action: String,
-    reason: String,
-    recommendations: [mongoose.Schema.Types.Mixed],
-    adjustments: mongoose.Schema.Types.Mixed
+  diagnosis: mongoose.Schema.Types.Mixed,
+  goals: [mongoose.Schema.Types.Mixed],
+  plan: mongoose.Schema.Types.Mixed,
+  monitoring: mongoose.Schema.Types.Mixed,
+  adaptation: mongoose.Schema.Types.Mixed,
+  // Aggregated LLM insights (populated during async pipeline)
+  llmSummary: {
+    commonMistakes: [String],
+    weakPatterns: [String],
+    improvementAreas: [String],
+    analyzedCount: { type: Number, default: 0 },
+    lastAnalyzedAt: Date
   },
   decisions: [{
     agent: String,
@@ -705,18 +676,31 @@ const agentOutputSchema = new mongoose.Schema({
 agentOutputSchema.index({ userId: 1, createdAt: -1 });
 agentOutputSchema.index({ sessionId: 1 });
 
+/**
+ * UPSERT agent output by userId + sessionId
+ * On re-run (after LLM enrichment), overwrites previous output for same session
+ */
 agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionId, loopResult) {
-  return this.create({
-    userId: userId.toLowerCase().trim(),
+  const normalizedUserId = userId.toLowerCase().trim();
+  const data = {
+    userId: normalizedUserId,
     sessionId,
     diagnosis: loopResult.diagnosis,
     goals: loopResult.goals,
     plan: loopResult.plan,
     monitoring: loopResult.monitoring,
     adaptation: loopResult.adaptation,
+    llmSummary: loopResult.llmSummary || null,
     decisions: loopResult.decisions || [],
     status: 'completed'
-  });
+  };
+
+  // UPSERT: update if exists for this session, create if not
+  return this.findOneAndUpdate(
+    { userId: normalizedUserId, sessionId },
+    { $set: data },
+    { new: true, upsert: true }
+  );
 };
 
 const AgentOutput = mongoose.model('AgentOutput', agentOutputSchema);
@@ -918,7 +902,15 @@ const actionSchema = new mongoose.Schema({
   },
   actionType: {
     type: String,
-    enum: ['practice_problems', 'review_topic', 'take_break', 'focus_weak_area', 'celebrate_progress', 'custom'],
+    enum: [
+      'practice_problems', 'review_topic', 'take_break', 'focus_weak_area',
+      'celebrate_progress', 'custom',
+      // Planning agent phases / nextAction categories
+      'foundation', 'practice', 'challenge', 'review',
+      'improvement', 'focus_topic', 'increase_difficulty', 'revise', 'retry',
+      // Adaptation-derived actions
+      'learning', 'habit', 'maintenance', 'setup'
+    ],
     required: true
   },
   action: {
@@ -959,15 +951,21 @@ actionSchema.index({ userId: 1, createdAt: -1 });
 actionSchema.statics.createFromNextAction = async function(userId, sessionId, nextAction) {
   if (!nextAction) return null;
   
+  // Convert string priority to number (schema expects Number)
+  const priorityMap = { low: 1, medium: 2, high: 3, critical: 4 };
+  const numericPriority = typeof nextAction.priority === 'string'
+    ? (priorityMap[nextAction.priority] || 2)
+    : (nextAction.priority || 1);
+
   return this.create({
     userId: userId.toLowerCase().trim(),
     sessionId,
-    actionType: nextAction.type || 'practice_problems',
-    action: nextAction.action || nextAction.title || 'Complete recommended practice',
-    description: nextAction.description || nextAction.reason,
+    actionType: nextAction.type || nextAction.category || 'practice_problems',
+    action: nextAction.action || nextAction.next_action || nextAction.title || 'Complete recommended practice',
+    description: nextAction.description || nextAction.details || nextAction.reason,
     suggestedProblems: nextAction.problems || [],
-    reason: nextAction.reason,
-    priority: nextAction.priority || 1,
+    reason: nextAction.reason || nextAction.details,
+    priority: numericPriority,
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
   });
 };

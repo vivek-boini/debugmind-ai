@@ -235,6 +235,20 @@ function storeSubmissionsBackground(userId, submissions, sessionId) {
 }
 
 /**
+ * Store submissions (AWAITABLE version)
+ * Used by persistExtractData so LLM pipeline can find submissions in DB
+ */
+async function storeSubmissionsAwaited(userId, submissions, sessionId) {
+  return safeOperation(async () => {
+    console.log(`[DBService] Storing ${submissions.length} submissions for ${userId} (awaited)`);
+    const results = await Submission.bulkAddSubmissions(userId, submissions, sessionId);
+    const successful = results.filter(r => r.success).length;
+    console.log(`[DBService] ✓ Stored ${successful}/${submissions.length} submissions`);
+    return { total: submissions.length, successful };
+  }, 'storeSubmissionsAwaited');
+}
+
+/**
  * Get user's submission history for a problem (by titleSlug)
  */
 async function getSubmissionHistory(userId, titleSlugOrProblemId) {
@@ -531,8 +545,9 @@ async function persistExtractData(userId, submissions, loopResult, sessionId) {
       console.log(`[DB] ✓ Saved analysis to session: ${sessionId}`);
     }
     
-    // These run in background (non-blocking)
-    storeSubmissionsBackground(userId, submissions, sessionId);
+    // AWAIT submissions — LLM pipeline needs them in DB
+    await storeSubmissionsAwaited(userId, submissions, sessionId);
+    // Progress snapshot can run in background (not needed by LLM)
     createProgressSnapshotBackground(userId, sessionId, loopResult.diagnosis, submissions);
     
     // Store goals with logging

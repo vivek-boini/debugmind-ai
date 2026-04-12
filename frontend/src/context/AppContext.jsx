@@ -24,7 +24,7 @@ export function AppProvider({ children }) {
   const [user, setUser] = useState(() => localStorage.getItem('debugmind_user') || null);
   const [data, setData] = useState(null);
   const [agentState, setAgentState] = useState(null);
-  const [codeAnalysis, setCodeAnalysis] = useState(null);
+  const [codeAnalysis, setCodeAnalysis] = useState(null); // DEPRECATED: kept for backward compat, no longer actively populated
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [isPolling, setIsPolling] = useState(false);
@@ -78,6 +78,13 @@ export function AppProvider({ children }) {
       // (backend memory store is now hydrated, so this returns full data)
       if (loadedData) {
         await fetchAgentState(data.user.userId);
+
+        // Auto re-fetch after 10s to pick up LLM-enhanced results
+        // (The async LLM pipeline runs ~5-10s after extract)
+        setTimeout(() => {
+          console.log('[AppContext] Delayed re-fetch for LLM-enhanced data');
+          loadUserDataFromDB(data.user.userId);
+        }, 10000);
       }
 
       console.log('[AppContext] Login successful:', data.user.userId);
@@ -427,52 +434,13 @@ export function AppProvider({ children }) {
     if (user) fetchAgentState(user);
   }, [user, fetchAgentState]);
 
-  // Fetch code analysis
+  // Fetch code analysis - DEPRECATED
+  // LLM analysis now runs automatically during /extract pipeline
+  // Data is available in submissionDocs from loadUserDataFromDB
   const fetchCodeAnalysis = useCallback(async (forceRefresh = false) => {
-    if (!user) return null;
-
-    const sanitizedUser = user.toLowerCase().trim();
-    console.log('[AppContext] Fetching code analysis for:', sanitizedUser);
-
-    try {
-      // Check localStorage first (unless forcing refresh)
-      if (!forceRefresh) {
-        const cached = localStorage.getItem(`debugmind_codeanalysis_${sanitizedUser}`);
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          setCodeAnalysis(parsed);
-          return parsed;
-        }
-      }
-
-      // Fetch from API
-      const url = forceRefresh 
-        ? `${API_BASE_URL}/code-analysis`
-        : `${API_BASE_URL}/code-analysis/${sanitizedUser}`;
-      
-      const options = forceRefresh 
-        ? {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username: sanitizedUser, forceRefresh: true })
-          }
-        : { method: 'GET' };
-
-      const res = await fetch(url, options);
-      
-      if (res.ok) {
-        const data = await res.json();
-        setCodeAnalysis(data);
-        localStorage.setItem(`debugmind_codeanalysis_${sanitizedUser}`, JSON.stringify(data));
-        return data;
-      }
-      
-      return null;
-    } catch (e) {
-      console.error('[AppContext] Failed to fetch code analysis:', e);
-      return null;
-    }
-  }, [user]);
+    console.warn('[AppContext] fetchCodeAnalysis is DEPRECATED. LLM analysis runs automatically during extraction.');
+    return null;
+  }, []);
 
   // Mark notification as read
   const markNotificationRead = useCallback((id) => {
@@ -515,17 +483,7 @@ export function AppProvider({ children }) {
       }
     }
 
-    // Also load cached code analysis
-    if (user) {
-      const cachedAnalysis = localStorage.getItem(`debugmind_codeanalysis_${user.toLowerCase()}`);
-      if (cachedAnalysis) {
-        try {
-          setCodeAnalysis(JSON.parse(cachedAnalysis));
-        } catch (e) {
-          localStorage.removeItem(`debugmind_codeanalysis_${user.toLowerCase()}`);
-        }
-      }
-    }
+    // Code analysis cache loading removed — LLM analysis now comes from DB via loadUserDataFromDB
   }, [user]);
 
   // Polling for agent state
@@ -608,7 +566,7 @@ export function AppProvider({ children }) {
     hasData: dataStatus === 'ready' && !!data && !!agentState?.submissions_count,
     isWaitingForData: isPolling && dataStatus !== 'ready',
     unreadCount: notifications.filter(n => !n.read).length,
-    hasCodeAnalysis: !!codeAnalysis?.submissions?.length
+    hasCodeAnalysis: false // DEPRECATED: no longer used
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
