@@ -203,8 +203,44 @@ export default function Goals() {
     );
   }
 
-  const goals = agentState?.goals || [];
+  const rawGoals = agentState?.goals || [];
   const goalsData = agentState?.goals_data || {};
+
+  // Text cleaning utility
+  const formatText = (text, type = 'desc') => {
+    if (!text) return '';
+    const lower = text.toLowerCase();
+    if (type === 'desc') {
+       if (lower.includes('lack of clear problem understanding')) return 'Improve understanding of problem patterns and solution approach';
+       if (lower.includes('no error handling') || lower.includes('edge case')) return 'Practice handling edge cases like n = 0 or empty inputs';
+    }
+    return text;
+  };
+
+  // Format and deduplicate goals
+  const goals = React.useMemo(() => {
+    const dedupMap = new Map();
+    rawGoals.forEach(g => {
+      let topic = g.topic || 'Concept Improvement';
+      let desc = formatText(g.description || g.strategy || '');
+      
+      if (topic === 'AI-Identified Skill Gap') {
+        const stratLower = (g.strategy || g.description || '').toLowerCase();
+        if (stratLower.includes('two pointer')) topic = 'Two Pointer Optimization';
+        else if (stratLower.includes('dp') || stratLower.includes('dynamic')) topic = 'Dynamic Programming Improvement';
+        else if (stratLower.includes('edge case')) topic = 'Edge Case Handling';
+        else topic = 'Concept Improvement';
+      }
+      topic = topic.replace(/AI-Identified/g, '').trim();
+
+      // Deduplication key
+      const key = `${topic}-${desc}`;
+      if (!dedupMap.has(key)) {
+        dedupMap.set(key, { ...g, topic, description: desc });
+      }
+    });
+    return Array.from(dedupMap.values());
+  }, [rawGoals]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">

@@ -285,22 +285,52 @@ function setGoals(input) {
     };
   }
 
+  const error_patterns_val = input.error_patterns || [];
+  const confidence_level_val = input.confidence_level || 'medium';
+  const learning_velocity_val = input.learning_velocity || { direction: 'stable' };
+  const llm_mistakes_val = input.llm_mistakes || [];
+  const progress_delta = input.progress_delta || { improvement: [], decline: [], unchanged: [] };
+
   const goals = [];
 
-  // Process each weak topic
+  // Determine current focus areas
   for (const topic of weak_topics) {
-    const currentScore = topic.score;
-    const severity = topic.severity || 'medium';
+    const currentScore = topic.score || 0;
+    
+    // Check if topic is improving or declining based on DB delta
+    const isImproving = progress_delta.improvement?.some(t => t.topic === topic.topic);
+    const isDeclining = progress_delta.decline?.some(t => t.topic === topic.topic);
+    
+    let severity = 'medium';
+    if (isDeclining || currentScore < 40) severity = 'critical';
+    else if (currentScore < 60) severity = 'high';
 
-    const targetScore = calculateTargetScore(currentScore, severity, learning_velocity);
-    const deadlineDays = calculateDeadline(currentScore, targetScore, severity, learning_velocity);
+    // Increase target threshold if the user has been improving!
+    let targetBoost = 0;
+    if (isImproving) targetBoost = 5;
+
+    let targetScore = Math.min(
+      90, // Fix 4: Max target cap at 90
+      Math.max(
+        MIN_TARGET_SCORE, 
+        currentScore + (TARGET_IMPROVEMENTS[severity]?.target_delta || 25) + targetBoost
+      )
+    );
+    
+    let goalStatus = 'active';
+    if (currentScore >= 85) {
+      targetScore = currentScore; // Do not increase further
+      goalStatus = 'near_completion';
+    }
+
+    const deadlineDays = calculateDeadline(currentScore, targetScore, severity, learning_velocity_val);
     const milestones = generateMilestones(topic.topic, currentScore, targetScore, deadlineDays, severity);
     const description = generateGoalDescription(
       topic.topic, 
       severity, 
       topic, 
-      error_patterns, 
-      confidence_level
+      error_patterns_val, 
+      confidence_level_val
     );
 
     // Calculate priority (lower score + higher severity = higher priority)
@@ -332,7 +362,7 @@ function setGoals(input) {
         improvement_rate_needed: Math.round((targetScore - currentScore) / deadlineDays * 10) / 10,
         problems_to_solve: Math.ceil((targetScore - currentScore) / 5) // Roughly 5% per problem
       },
-      status: 'active',
+      status: goalStatus,
       created_at: new Date().toISOString()
     });
   }

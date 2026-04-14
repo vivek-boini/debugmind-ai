@@ -534,14 +534,28 @@ submissionSchema.statics.addSubmission = async function(userId, submissionData, 
     }
   }
 
-  // Check for duplicate submission (same timestamp + status)
-  const isDuplicate = doc.submissions.some(s => 
-    s.timestamp?.getTime() === newEntry.timestamp?.getTime() && 
-    s.status === newEntry.status
-  );
+  const codeStr = submissionData.code || '';
+  const codeHash = codeStr.length > 0 ? 
+    require('crypto').createHash('md5').update(codeStr).digest('hex') : 'no-code';
+  
+  // Check for duplicate submission (Fix 1: Robust Duplicate Prevention)
+  const isDuplicate = doc.submissions.some(s => {
+    // 1. Exact identical status and code combination
+    if (s.code && codeStr && s.code === codeStr && s.status === newEntry.status) return true;
+    
+    // 2. Exact timestamp and status match
+    if (s.timestamp?.getTime() === newEntry.timestamp?.getTime() && s.status === newEntry.status) return true;
+    
+    return false;
+  });
   
   if (!isDuplicate) {
+    // Inject hash for future checks
+    if (!newEntry.codeHash && codeStr) newEntry.codeHash = codeHash;
     doc.submissions.push(newEntry);
+  } else {
+    // Optional logging parameter attached if duplicate
+    doc._skippedDuplicate = true;
   }
   
   // Recompute stats
@@ -572,21 +586,34 @@ submissionSchema.statics.addSubmission = async function(userId, submissionData, 
     attemptsToSolve: firstAccepted ? sortedByTime.indexOf(firstAccepted) + 1 : null
   };
 
-  await doc.save();
-  return doc;
+  let isNew = false;
+  if (!isDuplicate) {
+    isNew = true;
+    await doc.save();
+  }
+
+  return { doc, isNew };
 };
 
 submissionSchema.statics.bulkAddSubmissions = async function(userId, submissions, sessionId) {
   const results = [];
+  let newCount = 0;
+  let skippedCount = 0;
+  
   for (const sub of submissions) {
     try {
-      const result = await this.addSubmission(userId, sub, sessionId);
-      results.push({ success: true, problemId: result.problemId });
+      const { doc, isNew } = await this.addSubmission(userId, sub, sessionId);
+      if (isNew) newCount++;
+      if (doc && doc._skippedDuplicate) skippedCount++;
+      
+      results.push({ success: true, problemId: doc ? doc.problemId : sub.title, isNew });
     } catch (error) {
       results.push({ success: false, problemId: sub.title, error: error.message });
     }
   }
-  return results;
+  
+  // Return skipped metrics too (Fix 10 Logging)
+  return Object.assign(results, { newCount, skippedCount });
 };
 
 /**
@@ -649,7 +676,11 @@ const agentOutputSchema = new mongoose.Schema({
   goals: [mongoose.Schema.Types.Mixed],
   plan: mongoose.Schema.Types.Mixed,
   monitoring: mongoose.Schema.Types.Mixed,
+  progress: mongoose.Schema.Types.Mixed,
   adaptation: mongoose.Schema.Types.Mixed,
+  // FIX: Store next_action and recommendations (were previously lost)
+  next_action: mongoose.Schema.Types.Mixed,
+  recommendations: [mongoose.Schema.Types.Mixed],
   // Aggregated LLM insights (populated during async pipeline)
   llmSummary: {
     commonMistakes: [String],
@@ -682,6 +713,94 @@ agentOutputSchema.index({ sessionId: 1 });
  */
 agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionId, loopResult) {
   const normalizedUserId = userId.toLowerCase().trim();
+
+  // ============================================
+  // BUILD RECOMMENDATIONS: plan problems + similar problems
+  // ============================================
+
+  // Step 1: Extract problems from plan structure, normalize titleSlug
+  const planProblems = (loopResult.plan?.plan || []).flatMap(day =>
+    (day.items || day.problems || []).map(item => {
+      const base = typeof item === 'string' ? { title: item } : item;
+      return {
+        ...base,
+        // Normalize: always have titleSlug
+        titleSlug: base.titleSlug || base.slug || base.title?.toLowerCase().replace(/\s+/g, '-') || '',
+        day: day.day,
+        focus: day.focus || day.topic
+      };
+    })
+  );
+
+  // Step 2: Collect similar problems from Problem metadata (if available)
+  let similarProblems = [];
+  try {
+    // Get titleSlugs from plan problems to look up similar problems
+    const planSlugs = [...new Set(planProblems.map(p => p.titleSlug).filter(Boolean))];
+    if (planSlugs.length > 0) {
+      const Problem = mongoose.model('Problem');
+      const problemDocs = await Problem.find({
+        titleSlug: { $in: planSlugs }
+      }).select('similarProblems').lean();
+
+      for (const doc of problemDocs) {
+        if (doc.similarProblems && doc.similarProblems.length > 0) {
+          similarProblems.push(...doc.similarProblems.map(sp => ({
+            title: sp.title,
+            titleSlug: sp.titleSlug,
+            difficulty: sp.difficulty?.toLowerCase() || 'medium',
+            source: 'similar_problem',
+            url: `https://leetcode.com/problems/${sp.titleSlug}/`
+          })));
+        }
+      }
+    }
+  } catch (err) {
+    // Non-fatal: similar problems are optional
+    console.warn('[DB] Could not fetch similar problems (non-fatal):', err.message);
+  }
+
+  // Step 3: Merge plan problems + similar problems
+  const allProblems = [...planProblems, ...similarProblems];
+
+  // Step 4: Deduplicate using Map (strong composite key to avoid over-filtering)
+  const uniqueMap = new Map();
+  allProblems.forEach(item => {
+    // Use titleSlug as primary key, fall back to slug, then title+pattern composite
+    const key = (
+      item.titleSlug ||
+      item.slug ||
+      item.problemId ||
+      (item.title || '') + '_' + (item.pattern || '')
+    ).toLowerCase().trim();
+    if (key && !uniqueMap.has(key)) {
+      uniqueMap.set(key, item);
+    }
+  });
+  let recommendations = Array.from(uniqueMap.values());
+
+  console.log('[Recommendations] Plan:', planProblems.length, 'Similar:', similarProblems.length,
+    'After dedup:', recommendations.length);
+
+  // Step 5: Ensure minimum count — if dedup was too aggressive, relax
+  if (recommendations.length < 5 && allProblems.length >= 5) {
+    console.log('[Recommendations] ⚠️ Too few after dedup (' + recommendations.length + '), relaxing to', Math.min(allProblems.length, 10));
+    // Use allProblems but still remove exact titleSlug duplicates only
+    const lightDedup = new Map();
+    allProblems.forEach(item => {
+      const key = (item.titleSlug || item.slug || '').toLowerCase().trim();
+      if (!key || !lightDedup.has(key)) {
+        lightDedup.set(key || `fallback_${lightDedup.size}`, item);
+      }
+    });
+    recommendations = Array.from(lightDedup.values());
+  }
+
+  // Cap at 10 max recommendations
+  recommendations = recommendations.slice(0, 10);
+
+  console.log('[Recommendations] Final count:', recommendations.length);
+
   const data = {
     userId: normalizedUserId,
     sessionId,
@@ -690,10 +809,22 @@ agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionI
     plan: loopResult.plan,
     monitoring: loopResult.monitoring,
     adaptation: loopResult.adaptation,
+    progress: loopResult.progress,
+    // FIX: Store next_action and recommendations
+    next_action: loopResult.next_action || null,
+    recommendations,
     llmSummary: loopResult.llmSummary || null,
     decisions: loopResult.decisions || [],
     status: 'completed'
   };
+
+  console.log('[DB] Saving AgentOutput:', {
+    goalsCount: loopResult.goals?.length,
+    planDays: loopResult.plan?.plan?.length,
+    recommendationsCount: recommendations.length,
+    hasNextAction: !!loopResult.next_action,
+    hasDiagnosis: !!loopResult.diagnosis
+  });
 
   // UPSERT: update if exists for this session, create if not
   return this.findOneAndUpdate(
@@ -866,7 +997,10 @@ progressSnapshotSchema.statics.createSnapshot = async function(userId, sessionId
     improvementScore: Math.round((successRate - (prevSnapshot.overallStats?.successRate || 0)) * 10) / 10
   } : null;
 
-  return this.create({
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const snapshotData = {
     userId: normalizedUserId,
     sessionId,
     topicStats,
@@ -878,7 +1012,14 @@ progressSnapshotSchema.statics.createSnapshot = async function(userId, sessionId
       solvedProblems: diagnosis?.total_problems || 0
     },
     comparisonToPrevious
-  });
+  };
+
+  // UPSERT for today's snapshot (Fix 6: Ensure Single Snapshot Per Extract/Day)
+  return this.findOneAndUpdate(
+    { userId: normalizedUserId, createdAt: { $gte: todayStart } },
+    { $set: snapshotData },
+    { new: true, upsert: true }
+  );
 };
 
 const ProgressSnapshot = mongoose.model('ProgressSnapshot', progressSnapshotSchema);

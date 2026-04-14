@@ -157,6 +157,39 @@ export default function Insights() {
   const errorPatterns = diagnosis?.error_patterns || [];
   const confidenceLevel = diagnosis?.confidence_level;
 
+  // Format and deduplicate weak topics
+  const processedWeakTopics = React.useMemo(() => {
+    const rawTopics = data.weak_topics || [];
+    const dedupMap = new Map();
+    
+    rawTopics.forEach(t => {
+      let topic = t.topic || 'Concept Improvement';
+      let strategy = t.strategy || '';
+      
+      const stratLower = strategy.toLowerCase();
+      if (stratLower.includes('lack of clear problem understanding')) {
+        strategy = 'Improve understanding of problem patterns and solution approach';
+      } else if (stratLower.includes('no error handling') || stratLower.includes('edge case')) {
+        strategy = 'Practice handling edge cases like n = 0 or empty inputs';
+      }
+      
+      if (topic === 'AI-Identified Skill Gap') {
+        if (stratLower.includes('two pointer')) topic = 'Two Pointer Optimization';
+        else if (stratLower.includes('dp') || stratLower.includes('dynamic')) topic = 'Dynamic Programming Improvement';
+        else if (stratLower.includes('edge case')) topic = 'Edge Case Handling';
+        else topic = 'Concept Improvement';
+      }
+      topic = topic.replace(/AI-Identified/g, '').trim();
+
+      const key = `${topic}-${strategy}`;
+      if (!dedupMap.has(key)) {
+        dedupMap.set(key, { ...t, topic, strategy });
+      }
+    });
+    
+    return Array.from(dedupMap.values());
+  }, [data.weak_topics]);
+
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       <div className="flex justify-between items-end">
@@ -257,11 +290,11 @@ export default function Insights() {
 
       {/* Weak Topics Analysis */}
       <div className="grid grid-cols-1 gap-6">
-        {data.weak_topics?.map((t, i) => (
+        {processedWeakTopics.map((t, i) => (
           <Card key={i}>
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               <div className="lg:col-span-1 lg:border-r border-slate-800 lg:pr-8">
-                <Badge type="danger" className="mb-4">Pattern Alert</Badge>
+                <Badge type="danger" className="mb-4">Focus Area</Badge>
                 <h3 className="text-xl font-bold mb-2">{t.topic}</h3>
                 <p className="text-slate-400 text-sm leading-relaxed mb-6">{t.strategy}</p>
                 <div className="flex items-center gap-4">

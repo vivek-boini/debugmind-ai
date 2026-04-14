@@ -42,7 +42,6 @@ const PROBLEM_DATABASE = {
       { id: 1, title: 'Two Sum', slug: 'two-sum', pattern: 'hash lookup', focus: 'complement' },
       { id: 217, title: 'Contains Duplicate', slug: 'contains-duplicate', pattern: 'hash set', focus: 'detection' },
       { id: 242, title: 'Valid Anagram', slug: 'valid-anagram', pattern: 'frequency count', focus: 'comparison' },
-      { id: 1, title: 'Two Sum', slug: 'two-sum', pattern: 'hash map', focus: 'indexing' },
       { id: 169, title: 'Majority Element', slug: 'majority-element', pattern: 'counting', focus: 'Boyer-Moore' }
     ],
     medium: [

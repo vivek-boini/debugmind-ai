@@ -10,6 +10,7 @@ const port = process.env.PORT || 4000;
 // Import agent system
 import { orchestrator, memory, logger, codeAnalysisService, llmService, dbService, authService, problemService } from './services/index.js';
 import * as agents from './agents/index.js';
+import { STAGES } from './services/agentOrchestrator.js';
 
 // Initialize MongoDB connection (non-blocking)
 dbService.initialize().then(connected => {
@@ -150,6 +151,17 @@ app.post('/extract', async (req, res) => {
 
   // Sanitize username - lowercase and trim
   const sanitizedUsername = username.toLowerCase().trim();
+
+  // Fix 1: PREVENT DOUBLE EXTRACTION (PIPELINE LOCK)
+  if (!memory.tryStartPipeline(sanitizedUsername)) {
+    console.log(`[Extract] Rejected overlapping extraction for: ${sanitizedUsername}`);
+    return res.status(200).json({
+      status: "processing",
+      message: "Extraction already in progress",
+      user_id: sanitizedUsername
+    });
+  }
+
   console.log(`[Extract] Received data for user: ${sanitizedUsername} (original: ${username})`);
   console.log(`[Extract] Processing ${submissions.length} submissions`);
 
@@ -170,89 +182,84 @@ app.post('/extract', async (req, res) => {
   });
 
   try {
-    // Run agent loop (this updates userCache - existing behavior)
-    const loopResult = await orchestrator.runFullLoop(sanitizedUsername, submissions);
+    // Notify frontend we've started via memory cache
 
-    console.log(`[Extract] Agent loop completed for: ${sanitizedUsername}`);
-    console.log(`[Extract] Goals: ${loopResult.goals?.length || 0}, Plan days: ${loopResult.plan?.plan?.length || 0}`);
-    
-    // Wait for session to be created (if DB is available)
-    const session = await sessionPromise;
-    
-    // Persist all data to MongoDB — MUST complete before LLM pipeline
-    // This includes: submissions, agent outputs, goals, progress, actions
-    if (session) {
-      const capturedSessionId = session.sessionId;
-
-      // AWAIT persistence so submissions are in DB before LLM queries them
-      try {
-        const persistResult = await dbService.persistExtractData(sanitizedUsername, submissions, loopResult, capturedSessionId);
-        if (persistResult) {
-          console.log(`[Extract] ✓ Data persisted for session: ${persistResult.sessionId}`);
-        }
-      } catch (err) {
-        console.error('[Extract] Persistence failed:', err.message);
-      }
-
-      // ============================================
-      // ASYNC LLM PIPELINE (fire-and-forget, NON-BLOCKING)
-      // Runs AFTER DB persistence is COMPLETE
-      // Flow: Fetch problem metadata → LLM analysis → re-run agents → UPSERT AgentOutput
-      // ============================================
-      process.nextTick(async () => {
-        try {
-          console.log(`[AsyncPipeline] Starting for ${sanitizedUsername}`);
-          
-          // Step 0: Fetch problem metadata (BEFORE LLM, so LLM gets context)
-          try {
-            const titleSlugs = [...new Set(
-              submissions.map(s => s.titleSlug).filter(Boolean)
-            )];
-            if (titleSlugs.length > 0) {
-              const problemMap = await problemService.fetchAndCacheProblems(titleSlugs);
-              console.log(`[AsyncPipeline] Problem metadata: ${problemMap.size}/${titleSlugs.length} cached`);
-            }
-          } catch (problemErr) {
-            console.warn('[AsyncPipeline] Problem fetch failed (non-fatal):', problemErr.message);
-          }
-          
-          // Step 1: Run LLM analysis on recent problems (now with problem context)
-          const llmResult = await codeAnalysisService.runLLMAnalysis(sanitizedUsername);
-          console.log(`[AsyncPipeline] LLM analysis: ${llmResult.analyzed} analyzed, ${llmResult.skipped} skipped, ${llmResult.errors} errors`);
-          
-          // Step 2: Re-run agent pipeline with LLM-enriched data (UPSERTS to DB)
-          if (llmResult.analyzed > 0) {
-            await orchestrator.runEnhancedAgentPipeline(sanitizedUsername, capturedSessionId);
-            console.log(`[AsyncPipeline] ✓ Enhanced pipeline complete for ${sanitizedUsername}`);
-          } else {
-            console.log(`[AsyncPipeline] No new analyses — skipping enhanced pipeline`);
-          }
-        } catch (err) {
-          console.error('[AsyncPipeline] Error (non-fatal):', err.message);
-        }
-      });
-    }
-
-    // Response format unchanged - backward compatible
+    // Send immediate response so client unblocks
     res.json({
-      status: 'success',
+      status: 'processing',
       user_id: sanitizedUsername,
       received: submissions.length,
-      agent_loop: loopResult,
-      next_action: loopResult.next_action,
-      alerts: loopResult.alerts,
-      message: 'Agent loop executed successfully',
-      // New field (additive, doesn't break existing clients)
+      message: 'Agent pipeline started in background',
       session_id: sessionId || null
     });
+
+    // Fix 3: WAIT FOR PIPELINE COMPLETION (store status in memory)
+    memory.updateState(sanitizedUsername, { status: "processing" });
+
+    // Run agent loop and persistence non-blockingly
+    process.nextTick(async () => {
+      try {
+        console.log(`[Extract] Starting background agent loop for: ${sanitizedUsername}`);
+        const loopResult = await orchestrator.runFullLoop(sanitizedUsername, submissions);
+
+        console.log(`[Extract] Agent loop completed for: ${sanitizedUsername}`);
+
+        const session = await sessionPromise;
+        if (session) {
+          const capturedSessionId = session.sessionId;
+
+          // AWAIT persistence so submissions are in DB before LLM queries them
+          try {
+            const persistResult = await dbService.persistExtractData(sanitizedUsername, submissions, loopResult, capturedSessionId);
+            if (persistResult) {
+              console.log(`[Extract] ✓ Data persisted for session: ${persistResult.sessionId}`);
+            }
+          } catch (err) {
+            console.error('[Extract] Persistence failed:', err.message);
+          }
+
+          // ============================================
+          // ASYNC LLM PIPELINE (fire-and-forget, NON-BLOCKING)
+          // ============================================
+          console.log(`[AsyncPipeline] Starting for ${sanitizedUsername}`);
+
+          try {
+            const titleSlugs = [...new Set(submissions.map(s => s.titleSlug).filter(Boolean))];
+            if (titleSlugs.length > 0) {
+              await problemService.fetchAndCacheProblems(titleSlugs);
+            }
+          } catch (problemErr) { }
+          try {
+            const llmResult = await codeAnalysisService.runLLMAnalysis(sanitizedUsername);
+
+            if (llmResult && llmResult.analyzed > 0) {
+              await orchestrator.runEnhancedAgentPipeline(sanitizedUsername, capturedSessionId);
+              console.log(`[AsyncPipeline] ✓ Enhanced pipeline complete for ${sanitizedUsername}`);
+            }
+
+          } catch (pipelineErr) {
+            console.error("[Pipeline Error]", pipelineErr);
+          }
+        }
+      } catch (backgroundError) {
+        console.error('[Extract] Background processing error:', backgroundError);
+        if (sessionId) {
+          dbService.updateSessionStatus(sessionId, 'failed', backgroundError.message).catch(() => { });
+        }
+      } finally {
+        memory.updateState(sanitizedUsername, { status: "ready" });
+        memory.endPipeline(sanitizedUsername);
+      }
+    });
+
   } catch (error) {
     console.error('[Extract] Error:', error);
-    
+
     // Update session status if we have one
     if (sessionId) {
-      dbService.updateSessionStatus(sessionId, 'failed', error.message).catch(() => {});
+      dbService.updateSessionStatus(sessionId, 'failed', error.message).catch(() => { });
     }
-    
+
     res.status(500).json({ error: 'Failed to process submissions', details: error.message });
   }
 });
@@ -264,7 +271,7 @@ app.post('/extract', async (req, res) => {
  */
 app.post('/code-analysis', async (req, res) => {
   console.warn('[DEPRECATED] POST /code-analysis called — LLM analysis now runs automatically during /extract.');
-  
+
   const { username } = req.body || {};
   if (!username) {
     return res.status(400).json({ error: 'Username is required' });
@@ -312,11 +319,11 @@ app.post('/code-analysis', async (req, res) => {
  */
 app.get('/code-analysis/:userId', validateUserId, async (req, res) => {
   console.warn('[DEPRECATED] GET /code-analysis/:userId called — use /load-user-data/:userId instead.');
-  
+
   try {
     const submissions = await dbService.getAllUserSubmissions(req.userId);
     const analyzed = (submissions || []).filter(s => s.analysis?.lastAnalyzedAt);
-    
+
     if (analyzed.length === 0) {
       return res.status(404).json({
         status: 'not_found',
@@ -419,31 +426,48 @@ app.post('/analyze', async (req, res) => {
  * Returns full agent state with explainability data
  * Includes status flag for frontend to detect if data exists
  */
-app.get('/agent-state/:userId', validateUserId, (req, res) => {
+app.get('/agent-state/:userId', validateUserId, async (req, res) => {
+  // Fix 1: Disable caching for agent state
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'Surrogate-Control': 'no-store'
+  });
+
   console.log(`[Agent State] Fetching state for user: ${req.userId}`);
 
-  const state = memory.getState(req.userId);
-  const hasData = state.submissions && state.submissions.length > 0;
+  // Fix 3: Fetch status from memory to see if we are currently processing
+  const memoryState = memory.getState(req.userId);
+  const isProcessing = memoryState?.status === 'processing';
 
-  if (!hasData) {
+  // Fix 6: ENSURE DB IS USED (NOT MEMORY)
+  const userData = await dbService.loadUserData(req.userId);
+
+  // Fix 7: Debug Logging
+  console.log(`[AgentState] Returning fresh data for ${req.userId}. Processing: ${isProcessing}`);
+
+  if (!userData || (!userData.hasData && !isProcessing)) {
     console.log(`[Agent State] No data found for user: ${req.userId}`);
-    return res.json({
+    return res.status(200).json({
       status: 'no_data',
       message: 'No submissions data found. Please use the Chrome extension to extract your LeetCode data.',
       user_id: req.userId
     });
   }
 
-  console.log(`[Agent State] Returning data for: ${req.userId} (${state.submissions.length} submissions)`);
+  // Fix 2: Versioning to prevent stale UI
+  const version = userData.agentOutput?.updatedAt ? new Date(userData.agentOutput.updatedAt).getTime() : Date.now();
 
-  const agentState = orchestrator.getAgentState(req.userId);
-
-  res.json({
-    status: 'ready',
-    ...agentState,
-    submissions: state.submissions,  // Include raw submissions for CodeAnalysis page
+  // Fix 4: MODIFY /agent-state RESPONSE
+  res.status(200).json({
+    status: isProcessing ? 'processing' : 'ready',
     user_id: req.userId,
-    submissions_count: state.submissions.length
+    submissions_count: userData.submissionDocs?.length || 0,
+    agentOutput: userData.agentOutput || null,
+    // Add raw submissions for CodeAnalysis page to maintain backwards compatibility
+    submissions: userData.submissionDocs?.flatMap(doc => doc.submissions) || [],
+    version // Added version for UI staleness check
   });
 });
 
@@ -745,7 +769,7 @@ app.get('/me', authService.authMiddleware, async (req, res) => {
   }
 
   const user = await dbService.findUserById(req.user.userId);
-  
+
   if (!user) {
     return res.json({
       user: req.user,
@@ -773,16 +797,16 @@ app.get('/me', authService.authMiddleware, async (req, res) => {
  */
 app.get('/check-user/:leetcodeUsername', async (req, res) => {
   const { leetcodeUsername } = req.params;
-  
+
   if (!leetcodeUsername || typeof leetcodeUsername !== 'string') {
     return res.status(400).json({
       error: 'Invalid username',
       message: 'LeetCode username is required'
     });
   }
-  
+
   const result = await dbService.checkUserExists(leetcodeUsername);
-  
+
   res.json(result || { exists: false });
 });
 
@@ -794,14 +818,21 @@ app.get('/check-user/:leetcodeUsername', async (req, res) => {
  */
 app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
   const userData = await dbService.loadUserData(req.userId);
-  
+
   if (!userData) {
     return res.status(404).json({
       error: 'User not found',
       message: 'No data found for this user'
     });
   }
-  
+
+  if (userData.isProcessing) {
+    return res.json({
+      status: 'processing',
+      message: 'Analysis in progress'
+    });
+  }
+
   if (!userData.hasData) {
     return res.json({
       user_id: req.userId,
@@ -809,7 +840,7 @@ app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
       message: 'User exists but has no session data. Please extract data from LeetCode.'
     });
   }
-  
+
   // ============================================
   // HYDRATE IN-MEMORY STORE FROM DB
   // DB is source of truth - cache is populated from DB
@@ -817,7 +848,7 @@ app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
   // ============================================
   try {
     console.log(`[Cache] Hydrating memory store for: ${req.userId}`);
-    
+
     // 1. Load submissions from DB and flatten for memory store
     const submissionDocs = userData.submissionDocs || await dbService.getAllUserSubmissions(req.userId);
     if (submissionDocs && submissionDocs.length > 0) {
@@ -842,7 +873,7 @@ app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
           });
         }
       }
-      
+
       if (flatSubmissions.length > 0) {
         memory.addSubmissions(req.userId, flatSubmissions);
         console.log(`[Cache] Loaded ${flatSubmissions.length} submissions into memory`);
@@ -852,7 +883,7 @@ app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
       memory.addSubmissions(req.userId, userData.submissions);
       console.log(`[Cache] Loaded ${userData.submissions.length} session submissions into memory`);
     }
-    
+
     // 2. Hydrate agent outputs (if available)
     const agentOutput = userData.agentOutput;
     if (agentOutput) {
@@ -872,23 +903,24 @@ app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
         memory.storeAdaptation(req.userId, agentOutput.adaptation);
       }
     }
-    
+
     // 3. Also hydrate goals from goals collection if agentOutput doesn't have them
     if (userData.goals && userData.goals.length > 0 && !agentOutput?.goals?.length) {
       memory.storeGoals(req.userId, userData.goals);
       console.log(`[Cache] Loaded ${userData.goals.length} goals from goals collection`);
     }
-    
+
     // 4. Mark agent loop as complete so /agent-state returns 'ready'
     memory.updateAgentStage(req.userId, 'complete');
-    
+
     console.log(`[Cache] ✓ Memory store hydrated for: ${req.userId}`);
   } catch (hydrateErr) {
     // Non-blocking: if hydration fails, still return the API response
     console.error('[Cache] Hydration failed (non-blocking):', hydrateErr.message);
   }
-  
-  // Format response to match existing frontend expectations
+
+  // FIX: Return COMPLETE agentOutput from DB — no filtering
+  // DB is the single source of truth
   const formattedData = {
     user_id: req.userId,
     hasData: userData.hasData, // Based on submissions count from DB
@@ -897,15 +929,8 @@ app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
       timestamp: userData.session?.createdAt,
       summaryStats: userData.session?.summaryStats
     },
-    // Agent outputs in format expected by frontend
-    agentOutput: userData.agentOutput ? {
-      diagnosis: userData.agentOutput.diagnosis,
-      goals: userData.agentOutput.goals,
-      plan: userData.agentOutput.plan,
-      monitoring: userData.agentOutput.monitoring,
-      adaptation: userData.agentOutput.adaptation,
-      nextAction: userData.agentOutput.nextAction
-    } : null,
+    // FIX: Return COMPLETE agent output — do NOT filter fields
+    agentOutput: userData.agentOutput || null,
     activeGoals: userData.goals || [],
     progressHistory: userData.progressHistory || [],
     pendingActions: userData.pendingActions || [],
@@ -913,8 +938,15 @@ app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
     submissionDocs: userData.submissionDocs || [],
     source: 'database'
   };
-  
-  console.log(`[DB] Returning user data - hasData: ${formattedData.hasData}, submissions: ${formattedData.submissionDocs.length}`);
+
+  console.log(`[DB] Returning user data:`, {
+    hasData: formattedData.hasData,
+    submissions: formattedData.submissionDocs.length,
+    goalsInAgentOutput: formattedData.agentOutput?.goals?.length || 0,
+    planDays: formattedData.agentOutput?.plan?.plan?.length || 0,
+    recommendations: formattedData.agentOutput?.recommendations?.length || 0,
+    hasNextAction: !!formattedData.agentOutput?.next_action
+  });
   res.json(formattedData);
 });
 
@@ -929,7 +961,7 @@ app.get('/load-user-data/:userId', validateUserId, async (req, res) => {
 app.get('/sessions/:userId', validateUserId, async (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 10;
   const sessions = await dbService.getRecentSessions(req.userId, limit);
-  
+
   res.json({
     user_id: req.userId,
     sessions: sessions || [],
@@ -945,7 +977,7 @@ app.get('/sessions/:userId', validateUserId, async (req, res) => {
 app.get('/submission-history/:userId/:problemId', validateUserId, async (req, res) => {
   const { problemId } = req.params;
   const history = await dbService.getSubmissionHistory(req.userId, problemId);
-  
+
   if (!history) {
     return res.status(404).json({
       error: 'Not found',
@@ -966,7 +998,7 @@ app.get('/submission-history/:userId/:problemId', validateUserId, async (req, re
  */
 app.get('/user-stats/:userId', validateUserId, async (req, res) => {
   const stats = await dbService.getUserSubmissionStats(req.userId);
-  
+
   res.json({
     user_id: req.userId,
     stats: stats || null,
@@ -982,7 +1014,7 @@ app.get('/progress-history/:userId', validateUserId, async (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 30;
   const history = await dbService.getProgressHistory(req.userId, limit);
   const trend = await dbService.getImprovementTrend(req.userId);
-  
+
   res.json({
     user_id: req.userId,
     history: history || [],
@@ -997,7 +1029,7 @@ app.get('/progress-history/:userId', validateUserId, async (req, res) => {
  */
 app.get('/active-goals/:userId', validateUserId, async (req, res) => {
   const goals = await dbService.getActiveGoals(req.userId);
-  
+
   res.json({
     user_id: req.userId,
     goals: goals || [],
@@ -1012,7 +1044,7 @@ app.get('/active-goals/:userId', validateUserId, async (req, res) => {
  */
 app.get('/pending-actions/:userId', validateUserId, async (req, res) => {
   const actions = await dbService.getPendingActions(req.userId);
-  
+
   res.json({
     user_id: req.userId,
     actions: actions || [],
@@ -1030,7 +1062,7 @@ app.post('/complete-action/:actionId', async (req, res) => {
   const { completedProblems } = req.body || {};
 
   const result = await dbService.completeAction(actionId, completedProblems || []);
-  
+
   if (!result) {
     return res.status(404).json({
       error: 'Not found',
@@ -1200,7 +1232,7 @@ app.post('/analyze-problem', async (req, res) => {
     const submissionList = submissions || (problem ? [problem] : null);
 
     if (!submissionList || submissionList.length === 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Submissions data required',
         message: 'Please provide submissions array in the request body'
       });
@@ -1234,7 +1266,7 @@ app.post('/analyze-problem', async (req, res) => {
     let trend = 'Struggling';
     const lastAccepted = statuses[statuses.length - 1] === 'Accepted';
     const firstAccepted = statuses[0] === 'Accepted';
-    
+
     if (acceptedCount === submissionList.length) {
       trend = 'Mastered';
     } else if (lastAccepted && !firstAccepted) {
@@ -1284,7 +1316,7 @@ Be concise. Each point should be 1-2 lines max.`;
       const sub = submissionList[0];
       const status = normalizeStatus(sub.status || sub.statusDisplay);
       const language = sub.lang || sub.language || 'Python';
-      
+
       prompt = `You are a coding mentor. Brief analysis:
 
 Problem: "${problemTitle}"
@@ -1353,7 +1385,7 @@ Be concise.`;
 
   } catch (error) {
     console.error('[AnalyzeProblem] Error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Analysis failed',
       message: error.message || 'Server error during analysis'
     });
@@ -1368,18 +1400,18 @@ app.post('/generate-solution', async (req, res) => {
   try {
     const { submissions, problemTitle } = req.body;
     console.log('[GenerateSolution] Request:', { problemTitle, submissionCount: submissions?.length });
-    
+
     if (!submissions || !Array.isArray(submissions) || submissions.length === 0) {
       return res.status(400).json({ error: 'No submissions provided' });
     }
-    
+
     // Get the latest submission's code
     const latest = submissions[submissions.length - 1];
     const codeSnippet = (latest.code || '').slice(0, 1500);
     const language = latest.lang || latest.language || 'Python';
     const title = problemTitle || latest.title || 'Problem';
     const titleSlug = latest.titleSlug || title.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    
+
     // Fetch problem context for accurate solution
     let problemSection = '';
     try {
@@ -1395,7 +1427,7 @@ app.post('/generate-solution', async (req, res) => {
     } catch (e) {
       console.log(`[GenerateSolution] No problem context for: ${titleSlug} (using title only)`);
     }
-    
+
     // Build JSON-structured prompt for code generation
     const prompt = `You are an expert coding mentor.
 
@@ -1434,7 +1466,7 @@ RULES:
         fallback: true
       });
     }
-    
+
     if (!llmResult.success || !llmResult.text) {
       return res.json({
         success: true,
@@ -1443,14 +1475,14 @@ RULES:
         fallback: true
       });
     }
-    
+
     // --- ROBUST PARSING with multiple fallback strategies ---
     const rawText = llmResult.text;
     let solution = null;
     let explanation = '';
     let timeComplexity = '';
     let spaceComplexity = '';
-    
+
     // Strategy 1: Parse as JSON (expected path with json_object mode)
     try {
       const parsed = JSON.parse(rawText);
@@ -1463,7 +1495,7 @@ RULES:
     } catch (e) {
       console.log('[GenerateSolution] JSON parse failed, trying fallbacks');
     }
-    
+
     // Strategy 2: Extract code block from markdown (if LLM ignored json mode)
     if (!solution) {
       const codeMatch = rawText.match(/```[\w]*\n?([\s\S]*?)```/);
@@ -1475,7 +1507,7 @@ RULES:
         console.log('[GenerateSolution] Extracted from code block');
       }
     }
-    
+
     // Strategy 3: Look for function definition in raw text
     if (!solution) {
       const funcMatch = rawText.match(/((?:def |class |function |var |const |let |public )[\s\S]*)/);
@@ -1484,7 +1516,7 @@ RULES:
         console.log('[GenerateSolution] Extracted function from raw text');
       }
     }
-    
+
     // --- CLEAN the code ---
     if (solution) {
       solution = solution
@@ -1494,24 +1526,24 @@ RULES:
         .replace(/\n[\s]*$/, '')     // Remove trailing blank lines
         .trim();
     }
-    
+
     // Build explanation string with complexity info
     const parts = [];
     if (timeComplexity) parts.push(`Time Complexity: ${timeComplexity}`);
     if (spaceComplexity) parts.push(`Space Complexity: ${spaceComplexity}`);
     if (explanation) parts.push(explanation);
     const fullExplanation = parts.join('. ').trim();
-    
+
     res.json({
       success: true,
       solution,
       explanation: fullExplanation || null,
       language
     });
-    
+
   } catch (error) {
     console.error('[GenerateSolution] Error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Solution generation failed',
       message: error.message
     });
@@ -1523,9 +1555,9 @@ RULES:
  */
 function generateFallbackAnalysis(problem, totalSubmissions = 1) {
   const isAccepted = problem.status?.toLowerCase().includes('accepted') ||
-                     problem.statusDisplay?.toLowerCase().includes('accepted');
-  
-  const progressionNote = totalSubmissions > 1 
+    problem.statusDisplay?.toLowerCase().includes('accepted');
+
+  const progressionNote = totalSubmissions > 1
     ? `\n**Attempts**: ${totalSubmissions} submissions for this problem`
     : '';
 
@@ -1551,7 +1583,7 @@ function generateLocalFallbackAnalysis(title, statuses, trend, acceptedCount, wr
   const progressionStr = statuses.join(' → ');
   const lastStatus = statuses[statuses.length - 1];
   const isAccepted = lastStatus === 'Accepted';
-  
+
   return `**Progression**: ${progressionStr}
 
 **What Changed**: Based on your ${statuses.length} attempts, you ${isAccepted ? 'successfully solved the problem' : 'are still working on it'}.

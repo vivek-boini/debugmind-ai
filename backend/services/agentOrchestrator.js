@@ -58,14 +58,71 @@ async function runFullLoop(userId, submissions) {
   };
 
   try {
+    // Fix 7: Consistent Data Source (Always read ground truth from DB)
+    const { Submission } = require('./mongoModels.js');
+    const dbSubmissions = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
+    if (dbSubmissions && dbSubmissions.length > 0) {
+      // Flatten model since DB returns grouped by titleSlug
+      submissions = dbSubmissions.flatMap(doc => doc.submissions.map(s => ({
+        ...s,
+        title: doc.title,
+        titleSlug: doc.titleSlug,
+        difficulty: doc.difficulty,
+        topicTags: doc.topics
+      })));
+    }
     // Stage 1: Extract & Store
     memory.updateAgentStage(userId, STAGES.EXTRACTING);
     memory.addSubmissions(userId, submissions);
     results.stages.extract = { status: 'success', count: submissions.length };
 
+    // --- NEW: Step 2, 3, 4 - Compute Progress Delta ---
+    const prevSession = await dbService.getPreviousAgentOutput(userId);
+    const currentStats = await dbService.buildProgressStats(userId);
+    
+    const progressDelta = {
+      improvement: [],
+      decline: [],
+      unchanged: [],
+      overallTrend: {
+        prevSuccessRate: prevSession?.diagnosis?.overall_success_rate || 0,
+        currentSuccessRate: currentStats.successRate,
+        delta: currentStats.successRate - (prevSession?.diagnosis?.overall_success_rate || 0)
+      }
+    };
+
+    if (prevSession && prevSession.diagnosis?.confidence_scores) {
+      const prevScores = prevSession.diagnosis.confidence_scores;
+      const insufficientTopics = currentStats.insufficientTopics || [];
+      
+      for (const [topic, score] of Object.entries(currentStats.topicScores)) {
+        if (insufficientTopics.includes(topic)) {
+          progressDelta.unchanged.push({ topic, prevScore: prevScores[topic] || 0, currentScore: score, delta: 0, status: 'insufficient_data' });
+          continue; // Skip delta compute if insufficient data
+        }
+        
+        const prevScore = prevScores[topic] || 0;
+        const delta = score - prevScore;
+        const topicDelta = { topic, prevScore, currentScore: score, delta };
+        
+        if (delta >= 5) progressDelta.improvement.push(topicDelta);
+        else if (delta <= -5) progressDelta.decline.push(topicDelta);
+        else progressDelta.unchanged.push(topicDelta); // Math.abs(delta) < 5
+      }
+    }
+
+    // Pass this along to memory for usage across agents
+    const orchestratorContext = {
+      submissions,
+      prevStats: prevSession ? prevSession.diagnosis : null,
+      progress: progressDelta,
+      currentStats
+    };
+
     // Stage 2: Diagnose
     memory.updateAgentStage(userId, STAGES.DIAGNOSING);
-    const diagnosis = agents.diagnose({ submissions });
+    // Augment diagnose payload
+    const diagnosis = agents.diagnose(orchestratorContext);
     memory.storeDiagnosis(userId, diagnosis);
 
     // Log diagnosis decision with full explainability
@@ -100,7 +157,8 @@ async function runFullLoop(userId, submissions) {
       error_patterns: diagnosis.error_patterns,
       confidence_level: diagnosis.confidence_level,
       learning_velocity: diagnosis.learning_velocity,
-      total_submissions: diagnosis.total_submissions
+      total_submissions: diagnosis.total_submissions,
+      progress_delta: progressDelta
     });
     memory.storeGoals(userId, goalsResult.goals);
 
@@ -161,8 +219,13 @@ async function runFullLoop(userId, submissions) {
       new_submissions: submissions,
       previous_progress: state.current_progress,
       goals: goalsResult.goals,
-      classifyProblem: agents.classifyProblem
+      classifyProblem: agents.classifyProblem,
+      // Inject progress trend explicitly
+      progress_delta: progressDelta
     });
+    
+    // Embed progress strictly
+    monitoring.progress_delta = progressDelta;
     memory.storeProgress(userId, monitoring);
 
     // Log monitoring decision
@@ -230,6 +293,7 @@ async function runFullLoop(userId, submissions) {
     results.plan = updatedState.current_plan;
     results.monitoring = updatedState.current_progress;
     results.adaptation = updatedState.current_adaptation;
+    results.progress = progressDelta;
 
     console.log(`[Orchestrator] Full loop complete - Goals: ${results.goals?.length || 0}, Plan days: ${results.plan?.plan?.length || 0}`);
 
@@ -780,6 +844,7 @@ async function runEnhancedAgentPipeline(userId, sessionId) {
       plan,
       monitoring,
       adaptation,
+      progress: monitoring.progressDelta,
       llmSummary,
       decisions: [],
       status: 'completed'

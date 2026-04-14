@@ -207,6 +207,46 @@ export default function Dashboard() {
     }
   }, [user, navigate]);
 
+  // Generate progress trend info
+  const metrics = data?.metrics || {};
+  const progress = Number(metrics.total_submissions || 0) > 0 
+    ? Math.min(100, Math.round((metrics.overall_success_rate || 0)))
+    : 0;
+
+  // Process and deduplicate weak topics
+  const processedWeakTopics = React.useMemo(() => {
+    const rawTopics = data?.weak_topics || [];
+    const dedupMap = new Map();
+    
+    rawTopics.forEach(t => {
+      let topic = t.topic || 'Concept Improvement';
+      let goal = t.goal || t.strategy || t.description || '';
+      
+      const goalLower = goal.toLowerCase();
+      if (goalLower.includes('lack of clear problem understanding')) {
+        goal = 'Improve understanding of problem patterns and solution approach';
+      } else if (goalLower.includes('no error handling') || goalLower.includes('edge case')) {
+        goal = 'Practice handling edge cases like n = 0 or empty inputs';
+      }
+
+      if (topic === 'AI-Identified Skill Gap') {
+        const stratLower = (t.strategy || t.description || '').toLowerCase();
+        if (stratLower.includes('two pointer')) topic = 'Two Pointer Optimization';
+        else if (stratLower.includes('dp') || stratLower.includes('dynamic')) topic = 'Dynamic Programming Improvement';
+        else if (stratLower.includes('edge case')) topic = 'Edge Case Handling';
+        else topic = 'Concept Improvement';
+      }
+      topic = topic.replace(/AI-Identified/g, '').trim();
+
+      const key = `${topic}-${goal}`;
+      if (!dedupMap.has(key)) {
+        dedupMap.set(key, { ...t, topic, goal });
+      }
+    });
+
+    return Array.from(dedupMap.values());
+  }, [data?.weak_topics]);
+
   // Handle extract latest data
   const handleExtractLatest = async () => {
     setIsExtracting(true);
@@ -306,6 +346,69 @@ export default function Dashboard() {
           {/* Next Action - Prominent */}
           <NextActionCard nextAction={agentState?.next_action} />
 
+          {/* Progress Trends - NEW */}
+          {agentState?.progress_delta && (agentState.progress_delta.improvement?.length > 0 || agentState.progress_delta.decline?.length > 0 || agentState.progress_delta.unchanged?.length > 0) && (
+            <Card className="border-l-4 border-l-accent-teal">
+              <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
+                <TrendingUp size={20} className="text-accent-teal" />
+                Recent Performance Trends
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                {agentState.progress_delta.improvement?.length > 0 && (
+                  <div className="space-y-3 bg-dark-900/30 p-3 rounded-lg border border-emerald-900/30">
+                    <p className="text-sm font-semibold text-emerald-400 flex items-center gap-2">
+                      <span>📈</span> Improved Areas
+                    </p>
+                    <ul className="space-y-2">
+                      {agentState.progress_delta.improvement.map((t, i) => (
+                        <li key={i} className="text-sm text-slate-300 flex justify-between items-center">
+                          <span className="truncate pr-2">{t.topic}</span>
+                          <span className="text-emerald-400 font-medium px-2 py-0.5 bg-emerald-900/30 rounded text-xs">+{t.delta}%</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                
+                {agentState.progress_delta.decline?.length > 0 && (
+                  <div className="space-y-3 bg-dark-900/30 p-3 rounded-lg border border-red-900/30">
+                    <p className="text-sm font-semibold text-red-400 flex items-center gap-2">
+                      <span>⚠️</span> Needs Focus
+                    </p>
+                    <ul className="space-y-2">
+                      {agentState.progress_delta.decline.map((t, i) => (
+                        <li key={i} className="text-sm text-slate-300 flex justify-between items-center">
+                          <span className="truncate pr-2">{t.topic}</span>
+                          <span className="text-red-400 font-medium px-2 py-0.5 bg-red-900/30 rounded text-xs">{t.delta}%</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                
+                {agentState.progress_delta.unchanged?.length > 0 && (
+                  <div className="space-y-3 bg-dark-900/30 p-3 rounded-lg border border-slate-700/30">
+                    <p className="text-sm font-semibold text-slate-400 flex items-center gap-2">
+                      <span>⚖️</span> Progress Track
+                    </p>
+                    <ul className="space-y-2">
+                      {agentState.progress_delta.unchanged.map((t, i) => (
+                        <li key={i} className="text-sm text-slate-300 flex justify-between items-center">
+                          <span className="truncate pr-2">{t.topic}</span>
+                          {t.status === 'insufficient_data' ? (
+                            <span className="text-slate-500 italic text-xs">Not enough data yet</span>
+                          ) : (
+                            <span className="text-slate-400 font-medium px-2 py-0.5 bg-slate-800/50 rounded text-xs">Stable ({t.currentScore}%)</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </Card>
+          )}
+
           {/* Next Steps from Adaptation */}
           {adaptationNextSteps.length > 0 && (
             <NextStepsCard nextSteps={adaptationNextSteps} />
@@ -313,7 +416,7 @@ export default function Dashboard() {
 
           {/* Weak Topics */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {data?.weak_topics?.map((t, i) => (
+            {processedWeakTopics.map((t, i) => (
               <Card key={i} className="card-hover border-l-4 border-l-accent-purple">
                 <div className="flex justify-between items-start mb-4">
                   <h3 className="font-bold text-lg">{t.topic}</h3>

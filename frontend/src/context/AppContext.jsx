@@ -35,6 +35,8 @@ export function AppProvider({ children }) {
 
   // Use ref to track if data was found (to stop polling)
   const dataFoundRef = useRef(false);
+  // Fix 2: Track staleness version
+  const versionRef = useRef(0);
 
   // ============================================
   // AUTHENTICATION FUNCTIONS
@@ -183,7 +185,7 @@ export function AppProvider({ children }) {
     try {
       console.log('[UI] Loading user data from DB for:', userId);
       const res = await fetch(`${API_BASE_URL}/load-user-data/${userId}`);
-      
+
       if (!res.ok) {
         console.log('[UI] No stored data for user');
         setDataStatus('no_data');
@@ -191,7 +193,13 @@ export function AppProvider({ children }) {
       }
 
       const userData = await res.json();
-      
+
+      // Fix 5: Prevent empty UI overwrite if still processing
+      if (userData.status === 'processing') {
+        console.log('[UI] Background processing in progress, keeping current state');
+        return userData; // Do not mutate state
+      }
+
       // hasData is based on submissions count (DB is source of truth)
       if (!userData.hasData) {
         console.log('[UI] User exists but no submissions in DB');
@@ -199,25 +207,46 @@ export function AppProvider({ children }) {
         return null;
       }
 
-      console.log('[UI] DB has data - hydrating state', {
-        submissionsCount: userData.submissionDocs?.length || 0,
-        hasAgentOutput: !!userData.agentOutput,
-        goalsCount: userData.agentOutput?.goals?.length || userData.activeGoals?.length || 0
+      // FIX: Use COMPLETE agentOutput from DB — do NOT recompute
+      const agentOutput = userData.agentOutput;
+
+      console.log('[AppContext] === LOAD FROM DB ===', {
+        hasAgentOutput: !!agentOutput,
+        goalsCount: agentOutput?.goals?.length || 0,
+        planDays: agentOutput?.plan?.plan?.length || 0,
+        recommendationsCount: agentOutput?.recommendations?.length || 0,
+        recommendationsSample: agentOutput?.recommendations?.slice(0, 2),
+        hasNextAction: !!agentOutput?.next_action,
+        hasDiagnosis: !!agentOutput?.diagnosis,
+        submissionsCount: userData.submissionDocs?.length || 0
       });
+
+      // FIX STEP 6: Reject if recommendations are empty
+      if (!agentOutput?.recommendations?.length) {
+        console.warn('[UI] ⚠️  SKIPPING empty recommendations update from DB');
+        // Still load other data but keep previous recommendations
+        return userData;
+      }
 
       // Set submissions count for hasData check
       const submissionsCount = userData.submissionDocs?.length || 0;
-      
-      // Build agent state - use agentOutput if available, otherwise build minimal state
+
+      // FIX: Build agent state directly from COMPLETE agentOutput
+      // Do NOT recompute or filter — use DB data as-is
       const agentStateData = {
         status: 'ready',
-        submissions_count: submissionsCount, // Critical for hasData
-        goals: userData.agentOutput?.goals || userData.activeGoals || [],
-        plan: userData.agentOutput?.plan,
-        progress: userData.agentOutput?.monitoring,
-        adaptation: userData.agentOutput?.adaptation,
-        next_action: userData.agentOutput?.nextAction,
-        diagnosis: userData.agentOutput?.diagnosis,
+        submissions_count: submissionsCount,
+        // Use goals from agentOutput first, fallback to activeGoals collection
+        goals: agentOutput?.goals || userData.activeGoals || [],
+        plan: agentOutput?.plan,
+        progress: agentOutput?.monitoring,
+        progress_delta: agentOutput?.progress,
+        adaptation: agentOutput?.adaptation,
+        diagnosis: agentOutput?.diagnosis,
+        // FIX: Use correct field name (next_action, not nextAction)
+        next_action: agentOutput?.next_action || null,
+        // FIX: Store recommendations from DB (already validated above)
+        recommendations: agentOutput.recommendations,
         // CRITICAL: Include agent_loop so Dashboard shows 'Completed' not 'Running'
         agent_loop: {
           current_stage: 'complete',
@@ -227,7 +256,12 @@ export function AppProvider({ children }) {
       };
       setAgentState(agentStateData);
 
-      // Build data object for UI components
+      // FIX: Use COMPLETE recommendations from DB — NO fallback, NO recomputation
+      const recommendedProblems = agentOutput.recommendations;
+
+      console.log('[UI] ✓ Recommendations from DB:', recommendedProblems.length);
+
+      // Build data object for UI components — use goals from agentOutput
       const goals = agentStateData.goals || [];
       const dataObj = {
         user: userId,
@@ -236,13 +270,15 @@ export function AppProvider({ children }) {
           confidence: g.current_score,
           score: g.current_score,
           goal: `Reach ${g.target_score}% success`,
-          strategy: `Focus on ${g.topic?.toLowerCase()} patterns`,
-          evidence: [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
+          strategy: g.strategy || `Focus on ${g.topic?.toLowerCase()} patterns`,
+          evidence: g.evidence || [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
         })),
-        agentic: userData.agentOutput || {},
+        // FIX: Include recommended_problems from DB
+        recommended_problems: recommendedProblems,
+        agentic: agentOutput || {},
         submissionDocs: userData.submissionDocs || []
       };
-      
+
       setData(dataObj);
       setDataStatus('ready');
       dataFoundRef.current = true;
@@ -250,7 +286,10 @@ export function AppProvider({ children }) {
       setIsPolling(false);
       localStorage.setItem('debugmind_data', JSON.stringify(dataObj));
 
-      console.log('[UI] ✓ State hydrated from DB - dashboard ready');
+      console.log('[AppContext] ✓ State hydrated from DB', {
+        recommendationsCount: recommendedProblems.length,
+        recommendationsSample: recommendedProblems.slice(0, 2)
+      });
       return userData;
     } catch (err) {
       console.error('[UI] Failed to load user data:', err);
@@ -309,27 +348,57 @@ export function AppProvider({ children }) {
     console.log('[UI] Fetching agent state for:', sanitizedUserId);
 
     try {
-      const res = await fetch(`${API_BASE_URL}/agent-state/${sanitizedUserId}`);
+      // Fix 2: Anti-cache query param and headers
+      const res = await fetch(`${API_BASE_URL}/agent-state/${sanitizedUserId}?t=${Date.now()}`, {
+        cache: 'no-store'
+      });
       if (!res.ok) {
         console.error('[UI] Agent state fetch failed:', res.status);
         return null;
       }
 
       const state = await res.json();
-      console.log('[UI] Agent state response:', { 
-        status: state.status, 
+      console.log('[UI] Agent state response:', {
+        status: state.status,
         submissions_count: state.submissions_count,
-        hasGoals: !!state.goals?.length 
+        hasGoals: !!state.goals?.length,
+        recommendationsCount: state.recommendations?.length || 0
       });
+
+      // Fix 5: Continue polling if processing
+      if (state.status === 'processing') {
+        console.log('[UI] Backend is processing data. Continuing to poll...');
+        return state; // Return state so polling loop doesn't fail, but DO NOT update UI data yet
+      }
 
       // Check if data is ready (status='ready' with submissions)
       // Accept data even if goals are empty, as long as we have submissions
       if (state.status === 'ready' && state.submissions_count > 0) {
-        console.log('[UI] ✓ Data ready! Submissions:', state.submissions_count, 'Goals:', state.goals?.length || 0);
+        // Fix 2: Versioning to prevent UI overwriting with stale fetch responses
+        if (state.version && state.version < versionRef.current) {
+          console.log(`[UI] Ignoring stale response (Ref: ${versionRef.current}, Incoming: ${state.version})`);
+          return state;
+        }
+        if (state.version) {
+          versionRef.current = state.version;
+        }
+        // FIX STEP 6: CRITICAL - Never overwrite recommendations with empty data
+        if (!state.recommendations || state.recommendations.length === 0) {
+          console.warn('[AppContext] ⚠️  REJECTING empty recommendations from agent state');
+          // Return early without updating state to prevent overwriting valid data
+          return null;
+        }
+
+        console.log('[AppContext] === AGENT STATE READY ===', {
+          recommendations: state.recommendations.length,
+          recommendationsSample: state.recommendations.slice(0, 2),
+          submissions: state.submissions_count,
+          goals: state.goals?.length || 0
+        });
         setDataStatus('ready');
         setAgentState(state);
         dataFoundRef.current = true;
-        
+
         // Stop polling explicitly
         setIsPolling(false);
 
@@ -344,11 +413,15 @@ export function AppProvider({ children }) {
             strategy: `Focus on ${g.topic?.toLowerCase()} patterns`,
             evidence: [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
           })) || [],
-          recommended_problems: state.plan?.plan?.[0]?.problems || [],
+          recommended_problems: state.recommendations,
           agentic: state
         };
         setData(dataObj);
         localStorage.setItem('debugmind_data', JSON.stringify(dataObj));
+
+        console.log('[AppContext] ✓ Data from agent state', {
+          recommendationsCount: state.recommendations.length
+        });
 
         // Add notification
         if (state.alerts?.length > 0 && state.alerts[0]?.title) {
@@ -392,10 +465,13 @@ export function AppProvider({ children }) {
       });
       if (!res.ok) throw new Error('System could not reach the analysis engine.');
       const json = await res.json();
-      setData(json);
 
-      // Save to localStorage for persistence
-      localStorage.setItem('debugmind_data', JSON.stringify(json));
+      // FIX STEP 2: CRITICAL - Never empty data set
+      if (json && Object.keys(json).length > 0) {
+        setData(json);
+        // Save to localStorage for persistence
+        localStorage.setItem('debugmind_data', JSON.stringify(json));
+      }
 
       if (json.agentic) {
         setAgentState({

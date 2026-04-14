@@ -44,74 +44,129 @@ function generateNextAction(state) {
     };
   }
 
-  // Get current state
-  const weakestTopic = diagnosis.weak_topics[0];
-  const successRate = current_progress?.progress?.success_rate || diagnosis.overall_success_rate || 0;
+  // Priority calculation & Deterministic Sorting (Step 5)
+  let weakestTopic = diagnosis?.weak_topics?.[0] || { topic: 'General Practice', score: 100 };
+  
+  if (goals && goals.length > 0) {
+    const sortedGoals = [...goals].sort((a, b) => {
+      // 1. Lowest success rate (current_score)
+      if (a.current_score !== b.current_score) {
+        return a.current_score - b.current_score;
+      }
+      // 2. Highest mistake frequency / severity (priority)
+      if (b.priority !== a.priority) {
+        return b.priority - a.priority;
+      }
+      // 3. Lowest confidence (if explicit, otherwise string comparison for determinism)
+      return (a.topic || '').localeCompare(b.topic || '');
+    });
+    weakestTopic = sortedGoals[0];
+  }
+
+  const successRate = current_progress?.progress?.success_rate || diagnosis?.overall_success_rate || 0;
   const trend = current_progress?.trend?.direction || 'stable';
   const adaptationAction = current_adaptation?.action || 'maintain_pace';
 
-  // Priority calculation
   let priority = 'medium';
-  if (weakestTopic.score < 30) priority = 'critical';
-  else if (weakestTopic.score < 50) priority = 'high';
+  if (weakestTopic.current_score < 30 || weakestTopic.score < 30) priority = 'critical';
+  else if (weakestTopic.current_score < 50 || weakestTopic.score < 50) priority = 'high';
+
+  // Fix labels and clean description
+  let formattedTopic = weakestTopic.topic || 'Concept Improvement';
+  if (formattedTopic === 'AI-Identified Skill Gap') {
+    const textPattern = (weakestTopic.strategy || weakestTopic.description || '').toLowerCase();
+    if (textPattern.includes('two pointer')) formattedTopic = 'Two Pointer Optimization';
+    else if (textPattern.includes('dp') || textPattern.includes('dynamic')) formattedTopic = 'Dynamic Programming Improvement';
+    else if (textPattern.includes('edge case')) formattedTopic = 'Edge Case Handling';
+    else formattedTopic = 'Concept Improvement';
+  }
+  formattedTopic = formattedTopic.replace(/AI-Identified/g, '').trim();
+
+  let formattedDesc = weakestTopic.description || weakestTopic.strategy || '';
+  if (formattedDesc.toLowerCase().includes('lack of clear problem understanding')) {
+    formattedDesc = 'Improve understanding of problem patterns and solution approach';
+  } else if (formattedDesc.toLowerCase().includes('no error handling') || formattedDesc.toLowerCase().includes('edge case')) {
+    formattedDesc = 'Practice handling edge cases like n = 0 or empty inputs';
+  }
+
+  // Determine icon and reason (Step 8 & Follow-up)
+  let icon = '🔥';
+  let reason = 'Selected to build consistency and practice patterns.';
+  
+  if (priority === 'critical') {
+    icon = '⚠️';
+    reason = `Because success rate is critically low (${successRate}%) and frequent mistakes were detected.`;
+  } else if (priority === 'high') {
+    icon = '🔥';
+    reason = `Because success rate is low (${successRate}%) and needs improvement.`;
+  } else if (trend.includes('improving')) {
+    icon = '📈';
+    reason = 'Because you are improving, keep up the momentum.';
+  }
 
   // Generate action based on adaptation state
   const actionGenerators = {
     simplify_problems: () => ({
-      next_action: `Focus on ${weakestTopic.topic} fundamentals - solve 2 easy problems to build confidence`,
+      next_action: `Focus Area: ${formattedTopic}`,
       priority,
       category: 'foundation',
-      icon: '📚',
-      details: `Your success rate is ${successRate}%. Let's strengthen the basics before advancing.`,
+      icon,
+      reason,
+      details: formattedDesc || `Your success rate is ${successRate}%. Let's strengthen the basics before advancing.`,
       problems: getProblemSuggestions(current_plan, weakestTopic.topic, 'easy', 2),
       estimated_time: '45-60 minutes'
     }),
 
     increase_difficulty: () => ({
-      next_action: `Ready to level up! Try a medium ${weakestTopic.topic} problem`,
+      next_action: `Focus Area: ${formattedTopic}`,
       priority: 'medium',
       category: 'challenge',
-      icon: '🔥',
-      details: `Great progress! Success rate: ${successRate}%. Time to push further.`,
+      icon,
+      reason,
+      details: formattedDesc || `Great progress! Success rate: ${successRate}%. Time to push further.`,
       problems: getProblemSuggestions(current_plan, weakestTopic.topic, 'medium', 1),
       estimated_time: '60-90 minutes'
     }),
 
     pause_and_review: () => ({
-      next_action: `Review your recent ${weakestTopic.topic} solutions before attempting new problems`,
+      next_action: `Focus Area: ${formattedTopic}`,
       priority: 'high',
       category: 'review',
-      icon: '🔍',
-      details: 'Understanding why solutions work is key to retention.',
+      icon,
+      reason,
+      details: formattedDesc || 'Understanding why solutions work is key to retention.',
       estimated_time: '30 minutes'
     }),
 
     change_strategy: () => ({
-      next_action: `Try a different approach to ${weakestTopic.topic} - watch a video explanation or read the editorial`,
+      next_action: `Focus Area: ${formattedTopic}`,
       priority: 'high',
       category: 'learning',
-      icon: '💡',
-      details: 'Sometimes a fresh perspective helps break through plateaus.',
+      icon,
+      reason,
+      details: formattedDesc || 'Sometimes a fresh perspective helps break through plateaus.',
       resources: getTopicResources(weakestTopic.topic),
       estimated_time: '20-30 minutes'
     }),
 
     maintain_pace: () => ({
-      next_action: `Continue with today's plan: ${getTodayFocus(current_plan)}`,
+      next_action: `Focus Area: ${formattedTopic}`,
       priority: 'medium',
       category: 'practice',
-      icon: '▶️',
-      details: `You're on track! Keep up the consistent practice.`,
+      icon,
+      reason,
+      details: formattedDesc || `You're on track! Keep up the consistent practice.`,
       problems: getTodaysProblems(current_plan),
       estimated_time: '60 minutes'
     }),
 
     encourage_activity: () => ({
-      next_action: 'Start your daily practice - even 1 problem makes a difference',
+      next_action: `Focus Area: ${formattedTopic}`,
       priority: 'high',
       category: 'habit',
-      icon: '⏰',
-      details: 'Consistency is more important than intensity.',
+      icon,
+      reason,
+      details: formattedDesc || 'Consistency is more important than intensity.',
       problems: getProblemSuggestions(current_plan, weakestTopic.topic, 'easy', 1),
       estimated_time: '15-30 minutes'
     })

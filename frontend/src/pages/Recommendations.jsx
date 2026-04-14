@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { BookOpen, Target, ExternalLink, ArrowRight, Lightbulb, TrendingUp, AlertTriangle, Zap } from 'lucide-react';
 import { useApp } from '../context/AppContext';
@@ -120,10 +120,17 @@ const PersonalizationInfo = ({ plan }) => {
 export default function Recommendations() {
   const navigate = useNavigate();
   const { user, data, hasData, agentState } = useApp();
+  const [selectedDifficulty, setSelectedDifficulty] = useState('ALL');
 
+  // FIX STEP 4: Remove location/route dependencies - only check auth state
   useEffect(() => {
+    console.log('[Recommendations] Mount/Update', {
+      hasData,
+      recommendationsCount: data?.recommended_problems?.length || 0,
+      recommendationsSample: data?.recommended_problems?.slice(0, 2)
+    });
     if (!user) navigate('/');
-  }, [user, navigate]);
+  }, [user, navigate]); // FIXED: removed data?.recommended_problems dependency
 
   if (!hasData) {
     return (
@@ -140,14 +147,42 @@ export default function Recommendations() {
     );
   }
 
-  // Get problems from today's plan or recommended problems
-  const todaysPlan = agentState?.plan?.plan?.filter(p => p.day === (agentState?.plan?.current_day || 1)) || [];
-  const problems = todaysPlan.flatMap(p => p.problems || []).length > 0
-    ? todaysPlan.flatMap(p => p.problems || [])
-    : data.recommended_problems || [];
+  // FIX STEP 1: Use recommended_problems from DB as sole source of truth
+  // NEVER rebuild from plan — that causes inconsistency
+  const problems = data.recommended_problems || [];
+
+  console.log('[Recommendations] ✓ Problems count:', problems.length);
+  // FIX STEP 7: Debug logging
+  if (problems.length === 0) {
+    console.warn('[Recommendations] ⚠️  WARNING: Recommendations count is 0!');
+  }
+
+  // Difficulty filter
+  const filteredProblems = selectedDifficulty === 'ALL'
+    ? problems
+    : problems.filter(p => {
+        const d = (typeof p === 'object' ? p.difficulty : 'medium') || 'medium';
+        return d.toLowerCase() === selectedDifficulty.toLowerCase();
+      });
+
+  // Counts per difficulty
+  const counts = {
+    ALL: problems.length,
+    EASY: problems.filter(p => (typeof p === 'object' ? p.difficulty : 'medium')?.toLowerCase() === 'easy').length,
+    MEDIUM: problems.filter(p => (typeof p === 'object' ? p.difficulty : 'medium')?.toLowerCase() === 'medium').length,
+    HARD: problems.filter(p => (typeof p === 'object' ? p.difficulty : 'medium')?.toLowerCase() === 'hard').length,
+  };
 
   // Get adaptation recommendations
   const adaptationRecs = agentState?.adaptation?.recommendations || [];
+
+  // Difficulty pill styles
+  const pillStyles = {
+    ALL: { active: 'bg-accent-purple text-white border-accent-purple', color: 'text-accent-purple' },
+    EASY: { active: 'bg-emerald-500 text-white border-emerald-500', color: 'text-emerald-400' },
+    MEDIUM: { active: 'bg-amber-500 text-white border-amber-500', color: 'text-amber-400' },
+    HARD: { active: 'bg-red-500 text-white border-red-500', color: 'text-red-400' },
+  };
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -156,7 +191,7 @@ export default function Recommendations() {
           <h2 className="text-2xl font-bold">Practice Strategy</h2>
           <p className="text-slate-400">Problems selected by the planning agent</p>
         </div>
-        <Badge type="info">{problems.length} problems</Badge>
+        <Badge type="info">{filteredProblems.length} of {problems.length} problems</Badge>
       </div>
 
       {/* Next Action Card */}
@@ -193,13 +228,43 @@ export default function Recommendations() {
         </Card>
       )}
 
+      {/* Difficulty Filter Pills */}
+      <div className="flex flex-wrap gap-2">
+        {['ALL', 'EASY', 'MEDIUM', 'HARD'].map(level => (
+          <button
+            key={level}
+            onClick={() => setSelectedDifficulty(level)}
+            className={`px-4 py-1.5 rounded-full text-xs font-semibold border transition-all duration-200 uppercase tracking-wider ${
+              selectedDifficulty === level
+                ? pillStyles[level].active
+                : 'bg-transparent text-slate-400 border-slate-700 hover:border-slate-500 hover:text-slate-200'
+            }`}
+          >
+            {level === 'ALL' ? 'All' : level.charAt(0) + level.slice(1).toLowerCase()}
+            <span className={`ml-1.5 ${selectedDifficulty === level ? 'opacity-80' : 'opacity-50'}`}>({counts[level]})</span>
+          </button>
+        ))}
+      </div>
+
       {/* Problems Grid */}
-      {problems.length > 0 ? (
+      {filteredProblems.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {problems.map((p, i) => (
+          {filteredProblems.map((p, i) => (
             <ProblemCard key={i} problem={p} index={i} />
           ))}
         </div>
+      ) : problems.length > 0 ? (
+        <Card className="text-center py-12">
+          <Target size={48} className="mx-auto mb-4 text-slate-600" />
+          <h3 className="text-lg font-bold mb-2">No {selectedDifficulty.toLowerCase()} problems</h3>
+          <p className="text-slate-400">Try selecting a different difficulty level.</p>
+          <button
+            onClick={() => setSelectedDifficulty('ALL')}
+            className="mt-4 px-4 py-2 rounded-lg bg-slate-800 text-sm hover:bg-slate-700 transition-colors"
+          >
+            Show all problems
+          </button>
+        </Card>
       ) : (
         <Card className="text-center py-12">
           <Target size={48} className="mx-auto mb-4 text-slate-600" />
@@ -231,19 +296,16 @@ export default function Recommendations() {
       </div>
 
       {/* Today's Focus Summary */}
-      {todaysPlan.length > 0 && (
+      {agentState?.plan?.plan?.length > 0 && (
         <Card className="p-4">
           <h3 className="font-semibold mb-3 flex items-center gap-2">
             <TrendingUp size={16} className="text-accent-purple" />
-            Today's Focus Areas
+            Focus Areas
           </h3>
           <div className="flex flex-wrap gap-2">
-            {todaysPlan.map((item, idx) => (
+            {[...new Set(agentState.plan.plan.map(item => item.focus))].slice(0, 6).map((focus, idx) => (
               <div key={idx} className="px-3 py-1.5 bg-slate-800 rounded-lg text-sm">
-                <span className="font-medium">{item.focus}</span>
-                {item.objective && (
-                  <span className="text-slate-400 ml-2">• {item.objective}</span>
-                )}
+                <span className="font-medium">{focus}</span>
               </div>
             ))}
           </div>

@@ -8,6 +8,20 @@
 // In-memory store
 const memoryStore = new Map();
 
+// Fix 1: Pipeline execution lock
+const inFlight = new Map();
+
+function tryStartPipeline(userId) {
+  const normalizedId = userId.toLowerCase();
+  if (inFlight.get(normalizedId)) return false;
+  inFlight.set(normalizedId, true);
+  return true;
+}
+
+function endPipeline(userId) {
+  inFlight.delete(userId.toLowerCase());
+}
+
 // State schema
 const createInitialState = (userId) => ({
   user_id: userId,
@@ -307,5 +321,7 @@ export {
   getAllUsers,
   getAllUserIds,
   exportState,
-  importState
+  importState,
+  tryStartPipeline,
+  endPipeline
 };

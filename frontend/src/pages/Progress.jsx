@@ -208,8 +208,12 @@ export default function Progress() {
   const { user, data, hasData, agentState } = useApp();
 
   useEffect(() => {
+    console.log('[Progress] Mount/Update', {
+      hasData,
+      recommendationsCount: data?.recommended_problems?.length || 0
+    });
     if (!user) navigate('/');
-  }, [user, navigate]);
+  }, [user, navigate]); // FIXED: removed data?.recommended_problems dependency
 
   if (!hasData) {
     return (
@@ -328,7 +332,7 @@ export default function Progress() {
                 <Activity size={12} className="text-accent-purple" />
               </div>
               <div>
-                <h4 className="font-bold text-sm capitalize">{item.stage.replace(/_/g, ' ')}</h4>
+                <h4 className="font-bold text-sm capitalize">{String(item?.stage ?? 'unknown_stage').replace(/_/g, ' ')}</h4>
                 <p className="text-xs text-slate-400">{new Date(item.timestamp).toLocaleString()}</p>
               </div>
             </div>

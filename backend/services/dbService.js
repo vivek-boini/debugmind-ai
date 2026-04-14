@@ -144,7 +144,7 @@ async function findOrCreateUser(leetcodeUsername) {
  * Update user stats after session
  */
 async function updateUserStats(userId, sessionStats) {
-  backgroundOperation(async () => {
+  return safeOperation(async () => {
     const user = await User.findOne({ userId: userId.toLowerCase() });
     if (!user) return;
 
@@ -244,9 +244,84 @@ async function storeSubmissionsAwaited(userId, submissions, sessionId) {
     console.log(`[DBService] Storing ${submissions.length} submissions for ${userId} (awaited)`);
     const results = await Submission.bulkAddSubmissions(userId, submissions, sessionId);
     const successful = results.filter(r => r.success).length;
-    console.log(`[DBService] ✓ Stored ${successful}/${submissions.length} submissions`);
-    return { total: submissions.length, successful };
+    const newCount = results.newCount || 0;
+    const skippedCount = results.skippedCount || 0;
+    console.log(`[Dedup] Skipped ${skippedCount} duplicate submissions for ${userId}`);
+    console.log(`[DBService] ✓ Stored ${newCount} NEW submissions (${successful}/${submissions.length} successful)`);
+    // Fix 7: Debug Logging
+    const allDbSubmissions = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
+    const totalDbCount = allDbSubmissions.reduce((acc, doc) => acc + (doc.submissions?.length || 0), 0);
+    console.log(`[DB] Total submissions after insert: ${totalDbCount}`);
+    
+    return { total: submissions.length, successful, newCount, results };
   }, 'storeSubmissionsAwaited');
+}
+
+/**
+ * Fetch LAST agent output (Step 2)
+ */
+async function getPreviousAgentOutput(userId) {
+  return safeOperation(async () => {
+    return AgentOutput.findOne({ userId: userId.toLowerCase().trim(), status: 'completed' })
+      .sort({ createdAt: -1 })
+      .lean();
+  }, 'getPreviousAgentOutput');
+}
+
+/**
+ * Build stats from ALL submissions (Step 3)
+ */
+async function buildProgressStats(userId) {
+  return safeOperation(async () => {
+    const submissions = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
+    
+    let totalAttempts = 0;
+    let acceptedCount = 0;
+    const topicStats = {};
+
+    submissions.forEach(sub => {
+      const attempts = sub.stats?.totalAttempts || 0;
+      const isProblemSolved = sub.stats?.isSolved || false;
+      
+      totalAttempts += attempts;
+      if (isProblemSolved) {
+        acceptedCount += 1;
+      }
+      
+      const topics = sub.topics || [];
+      topics.forEach(t => {
+        if (!topicStats[t]) {
+          topicStats[t] = { attempts: 0, problemsAttempted: 0, problemsSolved: 0 };
+        }
+        topicStats[t].attempts += attempts;
+        topicStats[t].problemsAttempted += 1;
+        if (isProblemSolved) {
+          topicStats[t].problemsSolved += 1;
+        }
+      });
+    });
+
+    const topicScores = {};
+    const insufficientTopics = [];
+    for (const [topic, stats] of Object.entries(topicStats)) {
+      if (stats.attempts < 3) insufficientTopics.push(topic);
+      topicScores[topic] = stats.problemsAttempted > 0 
+        ? Math.round((stats.problemsSolved / stats.problemsAttempted) * 100) 
+        : 0;
+    }
+
+    const totalProblems = submissions.length;
+    const successRate = totalProblems > 0 ? Math.round((acceptedCount / totalProblems) * 100) : 0;
+
+    return {
+      totalAttempts,
+      solvedCount: acceptedCount,
+      totalProblems,
+      successRate,
+      topicScores,
+      insufficientTopics
+    };
+  }, 'buildProgressStats');
 }
 
 /**
@@ -402,8 +477,8 @@ async function updateGoalProgress(goalId, currentValue) {
 /**
  * Create progress snapshot
  */
-function createProgressSnapshotBackground(userId, sessionId, diagnosis, submissions) {
-  backgroundOperation(async () => {
+async function createProgressSnapshotBackground(userId, sessionId, diagnosis, submissions) {
+  return safeOperation(async () => {
     const snapshot = await ProgressSnapshot.createSnapshot(userId, sessionId, diagnosis, submissions);
     console.log(`[DBService] Progress snapshot created for session: ${sessionId}`);
     return snapshot;
@@ -518,11 +593,14 @@ async function persistExtractData(userId, submissions, loopResult, sessionId) {
     // Update session status to processing
     await updateSessionStatus(sessionId, 'processing');
     
-    // Log what we're about to save
+    // Log what we're about to save (DEBUG)
+    const recommendationsCount = loopResult.plan?.plan?.flatMap(day => day.items || day.problems || [])?.length || 0;
     console.log(`[DB] Persisting data for ${userId}:`, {
       hasDiagnosis: !!loopResult.diagnosis,
       goalsCount: loopResult.goals?.length || 0,
       hasPlan: !!loopResult.plan,
+      planDays: loopResult.plan?.plan?.length || 0,
+      recommendationsCount,
       hasMonitoring: !!loopResult.monitoring,
       hasAdaptation: !!loopResult.adaptation,
       hasNextAction: !!loopResult.next_action,
@@ -549,24 +627,24 @@ async function persistExtractData(userId, submissions, loopResult, sessionId) {
     // AWAIT submissions — LLM pipeline needs them in DB
     await storeSubmissionsAwaited(userId, submissions, sessionId);
     // Progress snapshot can run in background (not needed by LLM)
-    createProgressSnapshotBackground(userId, sessionId, loopResult.diagnosis, submissions);
+    await createProgressSnapshotBackground(userId, sessionId, loopResult.diagnosis, submissions);
     
     // Store goals with logging
     if (loopResult.goals && loopResult.goals.length > 0) {
-      storeGoalsWithLogging(userId, sessionId, loopResult.goals);
+      await storeGoalsWithLogging(userId, sessionId, loopResult.goals);
     } else {
       console.warn(`[Agent] No goals to save for ${userId}`);
     }
     
     // Store actions with logging
     if (loopResult.next_action) {
-      storeActionWithLogging(userId, sessionId, loopResult.next_action);
+      await storeActionWithLogging(userId, sessionId, loopResult.next_action);
     } else {
       console.warn(`[Agent] No next_action to save for ${userId}`);
     }
     
     // Update user stats and last session in background
-    updateUserStats(userId, {
+    await updateUserStats(userId, {
       totalSubmissions: submissions.length,
       lastSessionId: sessionId
     });
@@ -592,8 +670,8 @@ async function persistExtractData(userId, submissions, loopResult, sessionId) {
 /**
  * Store goals with proper logging
  */
-function storeGoalsWithLogging(userId, sessionId, agentGoals) {
-  backgroundOperation(async () => {
+async function storeGoalsWithLogging(userId, sessionId, agentGoals) {
+  return safeOperation(async () => {
     const goals = await Goal.createFromAgentGoals(userId, sessionId, agentGoals);
     console.log(`[Agent] ✓ Goals stored: ${goals.length} goals for ${userId}`);
   }, 'storeGoalsWithLogging');
@@ -602,8 +680,8 @@ function storeGoalsWithLogging(userId, sessionId, agentGoals) {
 /**
  * Store action with proper logging
  */
-function storeActionWithLogging(userId, sessionId, nextAction) {
-  backgroundOperation(async () => {
+async function storeActionWithLogging(userId, sessionId, nextAction) {
+  return safeOperation(async () => {
     const action = await Action.createFromNextAction(userId, sessionId, nextAction);
     if (action) {
       console.log(`[Agent] ✓ Actions stored: ${action.actionType} for ${userId}`);
@@ -656,6 +734,16 @@ async function loadUserData(userId) {
     })
       .sort({ createdAt: -1 })
       .lean();
+    
+    // Fix 5: Prevent Empty UI Overwrite (RACE CONDITION)
+    const activeProcessingSession = await Session.findOne({
+      userId: normalizedUserId,
+      processingStatus: 'processing'
+    }).lean();
+
+    if (!latestSession && activeProcessingSession) {
+      return { user, hasData: true, isProcessing: true };
+    }
     
     if (!latestSession) return { user, hasData: false };
     
@@ -824,6 +912,8 @@ export {
   
   // Returning user
   loadUserData,
+  buildProgressStats,
+  getPreviousAgentOutput,
   checkUserExists,
   
   // Problem metadata

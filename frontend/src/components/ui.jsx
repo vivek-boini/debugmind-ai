@@ -101,7 +101,7 @@ export const NextActionCard = ({ nextAction }) => {
     <Card className={`${priorityColors[nextAction.priority] || priorityColors.medium} border-2`}>
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-2">
-          <Sparkles size={20} className="text-accent-teal" />
+          <span className="text-lg">{nextAction.icon || '🔥'}</span>
           <h3 className="font-bold">Next Action</h3>
         </div>
         {priorityBadges[nextAction.priority]}
@@ -109,9 +109,31 @@ export const NextActionCard = ({ nextAction }) => {
 
       <p className="text-sm font-medium mb-3">{nextAction.next_action}</p>
 
-      {nextAction.details && (
-        <p className="text-xs text-slate-400 mb-4">{nextAction.details}</p>
+      {nextAction.reason && (
+        <p className="text-xs text-accent-teal/90 italic mb-3 flex items-start gap-1.5">
+          <span className="mt-0.5">💡</span> {nextAction.reason}
+        </p>
       )}
+
+      {nextAction.details && (
+        <p className="text-xs text-slate-400 mb-2 leading-relaxed">{nextAction.details}</p>
+      )}
+
+      {nextAction.goal_context && (
+        <div className="mb-4">
+          <div className="flex items-center gap-2 p-2 bg-dark-900/40 rounded border border-slate-700/50">
+            <Target size={14} className="text-accent-purple" />
+            <p className="text-xs font-semibold text-slate-300">
+              Confidence: <span className="text-amber-400">Current: {nextAction.goal_context.current}%</span> → <span className="text-emerald-400">Target: {nextAction.goal_context.target}%</span>
+            </p>
+          </div>
+          <p className="text-[10px] text-slate-500 mt-1.5 ml-1 italic opacity-80">
+            * Confidence based on recent submissions
+          </p>
+        </div>
+      )}
+
+      {!nextAction.goal_context && <div className="mb-4" />}
 
       {nextAction.problems && nextAction.problems.length > 0 && (
         <div className="mb-4">
@@ -438,6 +460,8 @@ export const GoalsPanel = ({ goals }) => {
 // --- Learning Plan ---
 
 export const LearningPlan = ({ plan, onAdvanceDay }) => {
+  const [currentDay, setCurrentDay] = React.useState(plan?.current_day || 1);
+
   if (!plan || !plan.plan || plan.plan.length === 0) {
     return (
       <Card className="border-dashed border-slate-700">
@@ -449,9 +473,30 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
     );
   }
 
-  const currentDay = plan.current_day || 1;
+  // Get unique sorted day numbers from the plan
+  const allDays = [...new Set(plan.plan.map(p => p.day))].sort((a, b) => a - b);
+  const totalDays = allDays.length;
+
+  // Get items for current day
   const todaysPlan = plan.plan.filter(p => p.day === currentDay);
   const personalization = plan.personalization || [];
+
+  // Navigation handlers
+  const goBack = () => setCurrentDay(prev => {
+    const currentIdx = allDays.indexOf(prev);
+    return currentIdx > 0 ? allDays[currentIdx - 1] : prev;
+  });
+
+  const goNext = () => setCurrentDay(prev => {
+    const currentIdx = allDays.indexOf(prev);
+    return currentIdx < allDays.length - 1 ? allDays[currentIdx + 1] : prev;
+  });
+
+  const isFirstDay = allDays.indexOf(currentDay) <= 0;
+  const isLastDay = allDays.indexOf(currentDay) >= allDays.length - 1;
+
+  // Debug
+  console.log('[LearningPlan] currentDay:', currentDay, 'items:', todaysPlan.length, 'totalDays:', totalDays);
 
   return (
     <Card>
@@ -461,12 +506,60 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
           Learning Plan
         </h3>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-400">Day {currentDay}/{plan.summary?.total_days || '?'}</span>
-          <button onClick={onAdvanceDay} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors" title="Mark day complete">
+          {/* Back button */}
+          <button
+            onClick={goBack}
+            disabled={isFirstDay}
+            className={`p-1.5 rounded-lg transition-colors ${
+              isFirstDay
+                ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+            }`}
+            title="Previous day"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
+
+          <span className="text-xs text-slate-400 min-w-[60px] text-center">
+            Day {currentDay}/{plan.summary?.total_days || allDays[allDays.length - 1] || '?'}
+          </span>
+
+          {/* Next button */}
+          <button
+            onClick={goNext}
+            disabled={isLastDay}
+            className={`p-1.5 rounded-lg transition-colors ${
+              isLastDay
+                ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+            }`}
+            title="Next day"
+          >
             <ArrowRight size={14} />
           </button>
         </div>
       </div>
+
+      {/* Day selector pills */}
+      {totalDays > 1 && totalDays <= 14 && (
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {allDays.map(day => (
+            <button
+              key={day}
+              onClick={() => setCurrentDay(day)}
+              className={`w-8 h-8 rounded-lg text-xs font-medium transition-all ${
+                day === currentDay
+                  ? 'bg-accent-purple text-white ring-2 ring-accent-purple/30'
+                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+              }`}
+            >
+              {day}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Personalization Notes */}
       {personalization.length > 0 && (
@@ -483,7 +576,9 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
       )}
 
       <div className="mb-4">
-        <h4 className="text-xs font-bold text-accent-teal uppercase tracking-wider mb-3">Today's Focus</h4>
+        <h4 className="text-xs font-bold text-accent-teal uppercase tracking-wider mb-3">
+          Day {currentDay} Focus
+        </h4>
         {todaysPlan.length > 0 ? (
           <div className="space-y-3">
             {todaysPlan.map((item, idx) => (
@@ -499,7 +594,7 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
                 {/* Problems */}
                 <div className="flex flex-wrap gap-2 mb-3">
                   {item.problems?.map((problem, pIdx) => (
-                    <a key={pIdx} href={problem.url || `https://leetcode.com/problems/${(problem.slug || problem.title || problem).toString().toLowerCase().replace(/\s+/g, '-')}/`} target="_blank" rel="noreferrer"
+                    <a key={pIdx} href={problem.url || `https://leetcode.com/problems/${(problem.slug || problem.titleSlug || problem.title || problem).toString().toLowerCase().replace(/\s+/g, '-')}/`} target="_blank" rel="noreferrer"
                       className="flex items-center gap-1 px-2 py-1 bg-slate-800 rounded text-xs hover:bg-slate-700 transition-colors group">
                       <span>{problem.title || problem.lc_id || problem}</span>
                       <ExternalLink size={10} className="opacity-50 group-hover:opacity-100" />
@@ -507,17 +602,21 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
                   ))}
                 </div>
 
-                {/* Tip if available */}
-                {item.tip && (
+                {/* Tips */}
+                {item.tips && item.tips.length > 0 && (
                   <p className="text-xs text-accent-teal italic p-2 bg-accent-teal/5 rounded">
-                    💡 {item.tip}
+                    💡 {item.tips[0]}
                   </p>
                 )}
               </div>
             ))}
           </div>
         ) : (
-          <p className="text-sm text-slate-500 italic">No items for today</p>
+          <div className="p-6 text-center bg-slate-800/30 rounded-lg border border-dashed border-slate-700">
+            <Calendar size={24} className="mx-auto mb-2 text-slate-600" />
+            <p className="text-sm text-slate-500">No data for day {currentDay}</p>
+            <p className="text-xs text-slate-600 mt-1">Try navigating to another day</p>
+          </div>
         )}
       </div>
 
