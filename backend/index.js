@@ -217,11 +217,15 @@ app.post('/extract', async (req, res) => {
         // Fix 3: If no new submissions, skip entire agent + LLM pipeline
         if (newSubmissionsCount === 0) {
           console.log("[Pipeline] No new submissions, but running pipeline anyway");
+
+          memory.updateState(userId, { status: "ready" });
+
+          return;
         }
 
         // STEP 5: Ensure pipeline only finishes AFTER everything is awaited sequentially
         console.log(`[PIPELINE] Agent started for: ${sanitizedUsername}`);
-        
+
         let loopResult = await orchestrator.runFullLoop(sanitizedUsername, submissions);
 
         if (loopResult?.status === 'error') {
@@ -259,7 +263,7 @@ app.post('/extract', async (req, res) => {
             const persistResult = await dbService.persistExtractData(sanitizedUsername, submissions, loopResult, capturedSessionId);
             if (persistResult) {
               console.log(`[Extract] ✓ Data persisted for session: ${persistResult.sessionId}`);
-              
+
               // Force AgentOutput update 
               const { AgentOutput } = await import('./services/mongoModels.js');
               await AgentOutput.updateOne(
