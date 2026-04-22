@@ -216,7 +216,7 @@ app.post('/extract', async (req, res) => {
 
         // Fix 3: If no new submissions, skip entire agent + LLM pipeline
         if (newSubmissionsCount === 0) {
-          console.log("[Pipeline] No new submissions, but running pipeline anyway");
+          console.log("[Pipeline] No new submissions, skipping pipeline");
 
           memory.updateState(userId, { status: "ready" });
 
