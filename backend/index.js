@@ -199,46 +199,76 @@ app.post('/extract', async (req, res) => {
     // Run agent loop and persistence non-blockingly
     process.nextTick(async () => {
       try {
-        console.log(`[Extract] Starting background agent loop for: ${sanitizedUsername}`);
-        const loopResult = await orchestrator.runFullLoop(sanitizedUsername, submissions);
-
-        console.log(`[Extract] Agent loop completed for: ${sanitizedUsername}`);
-
+        // Fix 3: Store submissions FIRST to check for new data
         const session = await sessionPromise;
+        const capturedSessionId = session?.sessionId || null;
+
+        let newSubmissionsCount = 0;
         if (session) {
-          const capturedSessionId = session.sessionId;
-
-          // AWAIT persistence so submissions are in DB before LLM queries them
           try {
-            const persistResult = await dbService.persistExtractData(sanitizedUsername, submissions, loopResult, capturedSessionId);
-            if (persistResult) {
-              console.log(`[Extract] ✓ Data persisted for session: ${persistResult.sessionId}`);
-            }
-          } catch (err) {
-            console.error('[Extract] Persistence failed:', err.message);
+            const storeResult = await dbService.storeSubmissionsAwaited(sanitizedUsername, submissions, capturedSessionId);
+            newSubmissionsCount = storeResult?.newCount || 0;
+            console.log(`[PIPELINE] Submissions stored. New: ${newSubmissionsCount}, Total sent: ${submissions.length}`);
+          } catch (storeErr) {
+            console.error('[PIPELINE] Submission storage failed:', storeErr.message);
           }
+        }
 
-          // ============================================
-          // ASYNC LLM PIPELINE (fire-and-forget, NON-BLOCKING)
-          // ============================================
-          console.log(`[AsyncPipeline] Starting for ${sanitizedUsername}`);
+        // Fix 3: If no new submissions, skip entire agent + LLM pipeline
+        if (newSubmissionsCount === 0) {
+          console.log("[Pipeline] No new submissions, but running pipeline anyway");
+        }
+
+        // STEP 5: Ensure pipeline only finishes AFTER everything is awaited sequentially
+        console.log(`[PIPELINE] Agent started for: ${sanitizedUsername}`);
+        
+        let loopResult = await orchestrator.runFullLoop(sanitizedUsername, submissions);
+
+        if (loopResult?.status === 'error') {
+          console.error(`[PIPELINE] Agent failed for: ${sanitizedUsername}`, loopResult.errors);
+        } else {
+          console.log(`[PIPELINE] Agent success for: ${sanitizedUsername} — Goals: ${loopResult?.goals?.length || 0}`);
+        }
+
+        if (session) {
+          // Submissions already stored at line 209 — DO NOT store again
+          console.log(`[AsyncPipeline] Starting LLM & Enhanced Pipeline for ${sanitizedUsername}`);
 
           try {
             const titleSlugs = [...new Set(submissions.map(s => s.titleSlug).filter(Boolean))];
             if (titleSlugs.length > 0) {
               await problemService.fetchAndCacheProblems(titleSlugs);
             }
-          } catch (problemErr) { }
+          } catch (problemErr) { console.error("Problem fetch error:", problemErr.message); }
+
           try {
             const llmResult = await codeAnalysisService.runLLMAnalysis(sanitizedUsername);
-
             if (llmResult && llmResult.analyzed > 0) {
-              await orchestrator.runEnhancedAgentPipeline(sanitizedUsername, capturedSessionId);
-              console.log(`[AsyncPipeline] ✓ Enhanced pipeline complete for ${sanitizedUsername}`);
+              const enhancedResult = await orchestrator.runEnhancedAgentPipeline(sanitizedUsername, capturedSessionId);
+              if (enhancedResult) {
+                loopResult = enhancedResult; // override loopResult with enhanced
+                console.log(`[AsyncPipeline] ✓ Enhanced pipeline complete for ${sanitizedUsername}`);
+              }
             }
-
           } catch (pipelineErr) {
             console.error("[Pipeline Error]", pipelineErr);
+          }
+
+          // Persist FINAL extract data
+          try {
+            const persistResult = await dbService.persistExtractData(sanitizedUsername, submissions, loopResult, capturedSessionId);
+            if (persistResult) {
+              console.log(`[Extract] ✓ Data persisted for session: ${persistResult.sessionId}`);
+              
+              // Force AgentOutput update 
+              const { AgentOutput } = await import('./services/mongoModels.js');
+              await AgentOutput.updateOne(
+                { userId: sanitizedUsername },
+                { $set: { updatedAt: new Date() } }
+              );
+            }
+          } catch (err) {
+            console.error('[Extract] Persistence failed:', err.message);
           }
         }
       } catch (backgroundError) {
@@ -247,6 +277,7 @@ app.post('/extract', async (req, res) => {
           dbService.updateSessionStatus(sessionId, 'failed', backgroundError.message).catch(() => { });
         }
       } finally {
+        // NO async calls after this, correctly triggers UI
         memory.updateState(sanitizedUsername, { status: "ready" });
         memory.endPipeline(sanitizedUsername);
       }
@@ -456,8 +487,9 @@ app.get('/agent-state/:userId', validateUserId, async (req, res) => {
     });
   }
 
-  // Fix 2: Versioning to prevent stale UI
-  const version = userData.agentOutput?.updatedAt ? new Date(userData.agentOutput.updatedAt).getTime() : Date.now();
+  // STEP 1: Version = numeric timestamp from latest AgentOutput.updatedAt
+  const agentUpdatedAt = userData.agentOutput?.updatedAt;
+  const version = agentUpdatedAt ? new Date(agentUpdatedAt).getTime() : Date.now();
 
   // Fix 4: MODIFY /agent-state RESPONSE
   res.status(200).json({
@@ -467,8 +499,36 @@ app.get('/agent-state/:userId', validateUserId, async (req, res) => {
     agentOutput: userData.agentOutput || null,
     // Add raw submissions for CodeAnalysis page to maintain backwards compatibility
     submissions: userData.submissionDocs?.flatMap(doc => doc.submissions) || [],
-    version // Added version for UI staleness check
+    version, // Numeric timestamp for staleness check
+    lastUpdated: agentUpdatedAt || new Date().toISOString()
   });
+});
+
+// ============================================
+// PROGRESS HISTORY ROUTE
+// ============================================
+
+/**
+ * GET /progress-history/:userId
+ * Returns last 10 progress snapshots + improvement trend
+ * Used for historical charts and progress tracking
+ */
+app.get('/progress-history/:userId', validateUserId, async (req, res) => {
+  try {
+    const snapshots = await dbService.getProgressHistory(req.userId, 10);
+    const trend = await dbService.getImprovementTrend(req.userId);
+
+    res.json({
+      status: 'ok',
+      userId: req.userId,
+      snapshots: snapshots || [],
+      trend: trend || { trend: 'insufficient_data' },
+      count: snapshots?.length || 0
+    });
+  } catch (err) {
+    console.error('[ProgressHistory] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch progress history' });
+  }
 });
 
 /**

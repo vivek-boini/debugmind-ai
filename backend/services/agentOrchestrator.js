@@ -20,6 +20,7 @@ import { generateNextAction, generateAlerts, generateStrategyEvolution } from '.
 import { aggregateLLMInsights } from './codeAnalysisService.js';
 import { getProblemWithCache } from './problemService.js';
 import * as dbService from './dbService.js';
+import { Submission } from './mongoModels.js';
 
 // Agent loop stages
 const STAGES = {
@@ -59,7 +60,6 @@ async function runFullLoop(userId, submissions) {
 
   try {
     // Fix 7: Consistent Data Source (Always read ground truth from DB)
-    const { Submission } = require('./mongoModels.js');
     const dbSubmissions = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
     if (dbSubmissions && dbSubmissions.length > 0) {
       // Flatten model since DB returns grouped by titleSlug
@@ -295,7 +295,31 @@ async function runFullLoop(userId, submissions) {
     results.adaptation = updatedState.current_adaptation;
     results.progress = progressDelta;
 
-    console.log(`[Orchestrator] Full loop complete - Goals: ${results.goals?.length || 0}, Plan days: ${results.plan?.plan?.length || 0}`);
+    // STEP 1: Compute metrics from submissions (MANDATORY for Progress Dashboard)
+    const totalSubmissions = submissions.length;
+    const accepted = submissions.filter(s => {
+      const status = (s.status || s.statusDisplay || '').toLowerCase();
+      return status.includes('accepted') || status === 'ac';
+    }).length;
+    results.metrics = {
+      total_submissions: totalSubmissions,
+      total_accepted: accepted,
+      success_rate: totalSubmissions > 0 ? Math.round((accepted / totalSubmissions) * 100) : 0,
+      overall_success_rate: diagnosis.overall_success_rate || 0
+    };
+
+    // STEP 3: Build confidence_history for chart
+    const confidenceHistory = confidenceTracker.getHistory(userId);
+    results.confidence_history = {
+      overall_trend: confidenceHistory.overall_trend || null,
+      chart_data: confidenceTracker.getChartData(userId) || null,
+      summary: confidenceHistory.summary || null
+    };
+
+    // STEP 3: Also build strategy evolution for saving
+    results.strategy_evolution = generateStrategyEvolution(updatedState.adaptations);
+
+    console.log(`[Orchestrator] Full loop complete - Goals: ${results.goals?.length || 0}, Plan days: ${results.plan?.plan?.length || 0}, Metrics: ${JSON.stringify(results.metrics)}`);
 
   } catch (error) {
     results.errors.push({
@@ -452,7 +476,29 @@ async function runIncrementalUpdate(userId, newSubmissions) {
     results.monitoring = finalState.current_progress;
     results.adaptation = finalState.current_adaptation;
 
-    console.log(`[Orchestrator] Incremental update complete - Goals: ${results.goals?.length || 0}`);
+    // STEP 1: Compute metrics for incremental update too
+    const allSubs = finalState.submissions || [];
+    const totalSubs = allSubs.length;
+    const acceptedSubs = allSubs.filter(s => {
+      const status = (s.status || s.statusDisplay || '').toLowerCase();
+      return status.includes('accepted') || status === 'ac';
+    }).length;
+    results.metrics = {
+      total_submissions: totalSubs,
+      total_accepted: acceptedSubs,
+      success_rate: totalSubs > 0 ? Math.round((acceptedSubs / totalSubs) * 100) : 0,
+      overall_success_rate: finalState.diagnosis?.overall_success_rate || 0
+    };
+
+    // STEP 3: Confidence history
+    const confHistory = confidenceTracker.getHistory(userId);
+    results.confidence_history = {
+      overall_trend: confHistory.overall_trend || null,
+      chart_data: confidenceTracker.getChartData(userId) || null,
+      summary: confHistory.summary || null
+    };
+
+    console.log(`[Orchestrator] Incremental update complete - Goals: ${results.goals?.length || 0}, Metrics: ${JSON.stringify(results.metrics)}`);
 
   } catch (error) {
     results.errors.push({
@@ -847,7 +893,28 @@ async function runEnhancedAgentPipeline(userId, sessionId) {
       progress: monitoring.progressDelta,
       llmSummary,
       decisions: [],
-      status: 'completed'
+      status: 'completed',
+      // STEP 1+3: Include metrics + confidence_history in enhanced pipeline too
+      metrics: {
+        total_submissions: flatSubmissions.length,
+        total_accepted: flatSubmissions.filter(s => {
+          const st = (s.status || '').toLowerCase();
+          return st.includes('accepted') || st === 'ac';
+        }).length,
+        success_rate: flatSubmissions.length > 0
+          ? Math.round((flatSubmissions.filter(s => {
+              const st = (s.status || '').toLowerCase();
+              return st.includes('accepted') || st === 'ac';
+            }).length / flatSubmissions.length) * 100)
+          : 0,
+        overall_success_rate: diagnosis.overall_success_rate || 0
+      },
+      confidence_history: {
+        overall_trend: confidenceTracker.getHistory(sanitizedUserId).overall_trend || null,
+        chart_data: confidenceTracker.getChartData(sanitizedUserId) || null,
+        summary: confidenceTracker.getHistory(sanitizedUserId).summary || null
+      },
+      strategy_evolution: generateStrategyEvolution([adaptation])
     };
 
     // UPSERT to AgentOutput (overwrites previous for same session)

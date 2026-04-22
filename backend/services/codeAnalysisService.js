@@ -44,7 +44,7 @@ async function runLLMAnalysis(userId) {
     return result;
   }
 
-  // Sort by latest attempt DESC, take top 10
+  // Sort by latest attempt DESC, take top 10 candidates
   const sorted = [...submissions]
     .sort((a, b) => {
       const timeA = a.stats?.lastAttemptAt ? new Date(a.stats.lastAttemptAt).getTime() : 0;
@@ -53,16 +53,54 @@ async function runLLMAnalysis(userId) {
     })
     .slice(0, 10);
 
-  console.log(`[CodeAnalysis] Analyzing ${sorted.length} problems for ${userId} (LLM)`);
+  // Fix 1 + Fix 2 + Fix 3: Smart re-analysis filtering
+  const toAnalyze = [];
+  const skippedDocs = [];
 
   for (const doc of sorted) {
-    try {
-      // Skip if already analyzed
-      if (doc.analysis && doc.analysis.lastAnalyzedAt) {
-        result.skipped++;
-        continue;
-      }
+    // Fix 2: New submissions always get analyzed (safety fallback — even if code is missing)
+    if (doc.isNew) {
+      toAnalyze.push(doc);
+      continue;
+    }
 
+    // Step 3: Code hash change detection
+    const codeChanged =
+      doc.codeHash &&
+      doc.analysis?.codeHash !== doc.codeHash;
+
+    // Smart re-analysis: analyze if never analyzed, updated since last analysis, OR code changed
+    const shouldAnalyze =
+      !doc.analysis ||
+      !doc.analysis.lastAnalyzedAt ||
+      (doc.updatedAt && new Date(doc.updatedAt).getTime() > new Date(doc.analysis.lastAnalyzedAt).getTime()) ||
+      codeChanged;
+
+    // Step 4: Per-doc debug logging
+    console.log(`[LLM] ${doc.titleSlug}: codeChanged=${!!codeChanged} shouldAnalyze=${shouldAnalyze}`);
+
+    if (shouldAnalyze) {
+      toAnalyze.push(doc);
+    } else {
+      skippedDocs.push(doc);
+    }
+  }
+
+  // Fix 3: Limit to 5 per run to control LLM costs
+  const batch = toAnalyze.slice(0, 5);
+  const skippedFromLimit = toAnalyze.slice(5);
+
+  // Fix 4: Clear logging
+  console.log(`[LLM] To analyze: ${batch.length} (${skippedFromLimit.length} deferred, ${skippedDocs.length} already up-to-date)`);
+  result.skipped = skippedDocs.length + skippedFromLimit.length;
+
+  if (batch.length === 0) {
+    console.log(`[LLM] Nothing to analyze for ${normalizedUserId} — all submissions up-to-date`);
+    return result;
+  }
+
+  for (const doc of batch) {
+    try {
       // Build LIGHTWEIGHT prompt — NO full code
       const acceptedCount = doc.stats?.acceptedCount || 0;
       const totalAttempts = doc.stats?.totalAttempts || 0;
@@ -143,13 +181,16 @@ Rules:
       }
 
       // UPSERT analysis into Submission collection
+      // Fix 5: lastAnalyzedAt + codeHash set here — used for smart skip on next run
       const analysisData = {
         source: 'llm',
         mistakes: Array.isArray(parsed.mistakes) ? parsed.mistakes : [],
         patterns: Array.isArray(parsed.patterns) ? parsed.patterns : [],
         complexity: typeof parsed.complexity === 'string' ? parsed.complexity : '',
         improvement: typeof parsed.improvement === 'string' ? parsed.improvement : '',
-        lastAnalyzedAt: new Date()
+        lastAnalyzedAt: new Date(),
+        // Step 2+5: Store current code hash with analysis for future change detection
+        codeHash: doc.codeHash || undefined
       };
 
       await dbService.upsertSubmissionAnalysis(userId, doc.titleSlug, analysisData);

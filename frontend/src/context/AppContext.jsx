@@ -26,6 +26,7 @@ export function AppProvider({ children }) {
   const [agentState, setAgentState] = useState(null);
   const [codeAnalysis, setCodeAnalysis] = useState(null); // DEPRECATED: kept for backward compat, no longer actively populated
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState(''); // STEP 7: Visible loading state
   const [error, setError] = useState(null);
   const [isPolling, setIsPolling] = useState(false);
   const [dataStatus, setDataStatus] = useState('unknown'); // 'unknown' | 'no_data' | 'ready'
@@ -37,6 +38,11 @@ export function AppProvider({ children }) {
   const dataFoundRef = useRef(false);
   // Fix 2: Track staleness version
   const versionRef = useRef(0);
+  // STEP 6: Retry counter for polling
+  const retryCountRef = useRef(0);
+  const MAX_RETRIES = 20;
+  // STEP 10: Prevent multiple polling loops
+  const isPollingRef = useRef(false);
 
   // ============================================
   // AUTHENTICATION FUNCTIONS
@@ -221,6 +227,14 @@ export function AppProvider({ children }) {
         submissionsCount: userData.submissionDocs?.length || 0
       });
 
+      // STEP 6: Debug log for Progress Dashboard data
+      console.log('[Progress Debug]', {
+        metrics: agentOutput?.metrics,
+        history: agentOutput?.confidence_history?.chart_data?.datasets?.[0]?.data?.length || 0,
+        hasStrategyEvolution: !!agentOutput?.strategy_evolution,
+        updatedAt: agentOutput?.updatedAt
+      });
+
       // FIX STEP 6: Reject if recommendations are empty
       if (!agentOutput?.recommendations?.length) {
         console.warn('[UI] ⚠️  SKIPPING empty recommendations update from DB');
@@ -247,6 +261,12 @@ export function AppProvider({ children }) {
         next_action: agentOutput?.next_action || null,
         // FIX: Store recommendations from DB (already validated above)
         recommendations: agentOutput.recommendations,
+        // FIX 12: Include metrics + lastUpdated for Progress Dashboard
+        metrics: agentOutput?.metrics || agentOutput?.diagnosis?.metrics || null,
+        confidence_history: agentOutput?.confidence_history || null,
+        strategy_evolution: agentOutput?.strategy_evolution || null,
+        alerts: agentOutput?.alerts || [],
+        lastUpdated: agentOutput?.updatedAt || userData.session?.createdAt || null,
         // CRITICAL: Include agent_loop so Dashboard shows 'Completed' not 'Running'
         agent_loop: {
           current_stage: 'complete',
@@ -341,23 +361,33 @@ export function AppProvider({ children }) {
   }, [authLogout]);
 
   // Fetch agent state (from in-memory store on backend)
-  const fetchAgentState = useCallback(async (userId) => {
+  const fetchAgentState = useCallback(async (userId, force = false) => {
     if (!userId) return null;
 
     const sanitizedUserId = userId.toLowerCase().trim();
     console.log('[UI] Fetching agent state for:', sanitizedUserId);
+
+    // Polish 1: Guard — stop if polling was cancelled (unmount/navigation)
+    if (!isPollingRef.current && retryCountRef.current > 0) {
+      console.log('[Polling] Cancelled — component unmounted or navigation occurred');
+      return null;
+    }
 
     try {
       // Fix 2: Anti-cache query param and headers
       const res = await fetch(`${API_BASE_URL}/agent-state/${sanitizedUserId}?t=${Date.now()}`, {
         cache: 'no-store'
       });
+      // Handle non-200 responses
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
       if (!res.ok) {
         console.error('[UI] Agent state fetch failed:', res.status);
         return null;
       }
 
-      const state = await res.json();
+      let state = await res.json();
       console.log('[UI] Agent state response:', {
         status: state.status,
         submissions_count: state.submissions_count,
@@ -365,39 +395,139 @@ export function AppProvider({ children }) {
         recommendationsCount: state.recommendations?.length || 0
       });
 
-      // Fix 5: Continue polling if processing
+      // STEP 9: Handle invalid response gracefully
+      if (!state || !state.status) {
+        console.error('[Polling] Invalid response from agent-state');
+        setLoading(false);
+        setLoadingMessage('');
+        isPollingRef.current = false;
+        return null;
+      }
+
+      // STEP 4+5+6: Continue polling if processing — with retry limit
       if (state.status === 'processing') {
-        console.log('[UI] Backend is processing data. Continuing to poll...');
-        return state; // Return state so polling loop doesn't fail, but DO NOT update UI data yet
+        if (retryCountRef.current >= 20) {
+          // STEP 6: Timeout but force one final fetch to check if ready
+          console.warn('[Polling] forcing final fetch');
+          await fetchAgentState(sanitizedUserId, true);
+          isPollingRef.current = false;
+          retryCountRef.current = 0;
+          return state;
+        } else {
+          retryCountRef.current++;
+          setLoadingMessage(`Processing your progress... (${retryCountRef.current}/${20})`);
+          console.log(`[UI] Backend processing. Retry ${retryCountRef.current}/${20}...`);
+          setTimeout(() => fetchAgentState(sanitizedUserId), 1500);
+          return state; // STEP 5: Do NOT update UI
+        }
+      }
+
+      // STEP 6: Reset retry counter on non-processing status
+      retryCountRef.current = 0;
+      isPollingRef.current = false;
+
+      // STEP 5: Only proceed if status is ready
+      if (state.status !== 'ready' && state.status !== 'no_data') {
+        console.log('[UI] Status not ready:', state.status);
+        setLoading(false);
+        setLoadingMessage('');
+        return state;
       }
 
       // Check if data is ready (status='ready' with submissions)
-      // Accept data even if goals are empty, as long as we have submissions
       if (state.status === 'ready' && state.submissions_count > 0) {
-        // Fix 2: Versioning to prevent UI overwriting with stale fetch responses
-        if (state.version && state.version < versionRef.current) {
-          console.log(`[UI] Ignoring stale response (Ref: ${versionRef.current}, Incoming: ${state.version})`);
+        // Fix 4: Only reject truly invalid data (no agentOutput at all)
+        if (!state || !state.agentOutput) {
+          console.warn("[UI] Invalid agent state — no agentOutput object");
           return state;
         }
-        if (state.version) {
-          versionRef.current = state.version;
+
+        // STEP 2: Single clean version check using numeric timestamp
+        const incomingVersion = Number(state.version || 0);
+        const currentVersion = Number(versionRef.current || 0);
+
+        if (incomingVersion > 0 && currentVersion > 0 && incomingVersion < currentVersion) {
+          console.log(`[UI] Ignoring stale data (current: ${currentVersion}, incoming: ${incomingVersion})`);
+          return state;
         }
-        // FIX STEP 6: CRITICAL - Never overwrite recommendations with empty data
-        if (!state.recommendations || state.recommendations.length === 0) {
-          console.warn('[AppContext] ⚠️  REJECTING empty recommendations from agent state');
-          // Return early without updating state to prevent overwriting valid data
-          return null;
+
+        // ALWAYS update versionRef when equal or newer
+        if (incomingVersion > 0) {
+          versionRef.current = incomingVersion;
+        }
+
+        // STEP 5: Debug log for Progress Dashboard data
+        console.log('[UI FETCH]', {
+          status: state.status,
+          solved: state.agentOutput?.metrics?.total_accepted,
+          rate: state.agentOutput?.metrics?.success_rate,
+          hasConfidenceHistory: !!state.agentOutput?.confidence_history,
+          recommendations: state.recommendations?.length || 0
+        });
+
+        // STEP 8: Only skip if recommendations is explicitly undefined (not empty array)
+        const incomingRecs = state.agentOutput?.recommendations;
+        if (dataFoundRef.current && incomingRecs === undefined) {
+          console.log('[UI] Skipping update — no recommendations field in response');
+          return state;
         }
 
         console.log('[AppContext] === AGENT STATE READY ===', {
-          recommendations: state.recommendations.length,
-          recommendationsSample: state.recommendations.slice(0, 2),
+          recommendations: state.agentOutput?.recommendations?.length || 0,
           submissions: state.submissions_count,
-          goals: state.goals?.length || 0
+          goals: state.agentOutput?.goals?.length || 0,
+          hasMonitoring: !!state.agentOutput?.monitoring,
+          byTopicKeys: Object.keys(state.agentOutput?.monitoring?.by_topic || {})
         });
+        
+        // STEP 2: Map raw API response to normalized agentState structure
+        // This MUST match the shape produced by loadUserDataFromDB
+        const agentOutput = state.agentOutput || {};
+        const mappedState = {
+          status: state.status,
+          submissions_count: state.submissions_count,
+          goals: agentOutput.goals || [],
+          plan: agentOutput.plan,
+          progress: agentOutput.monitoring,           // by_topic lives here
+          progress_delta: agentOutput.progress,
+          adaptation: agentOutput.adaptation,
+          diagnosis: agentOutput.diagnosis,
+          next_action: agentOutput.next_action || null,
+          recommendations: agentOutput.recommendations || [],
+          metrics: agentOutput.metrics || agentOutput.diagnosis?.metrics || null,
+          confidence_history: agentOutput.confidence_history || null,
+          strategy_evolution: agentOutput.strategy_evolution || null,
+          alerts: agentOutput.alerts || [],
+          lastUpdated: agentOutput.updatedAt || state.lastUpdated || null,
+          agent_loop: agentOutput.agent_loop || {
+            current_stage: 'complete',
+            total_runs: 1,
+            stage_history: ['extracting', 'diagnosing', 'setting_goals', 'planning', 'monitoring', 'adapting', 'complete']
+          },
+          // Keep raw agentOutput for components that need it
+          agentOutput: agentOutput,
+          version: state.version
+        };
+
         setDataStatus('ready');
-        setAgentState(state);
+        setAgentState(mappedState);
+        setLoading(false);
+        setLoadingMessage('');
+        setError(null); // Clear any previous timeout error
         dataFoundRef.current = true;
+
+        // STEP 1: Debug log for topic stats
+        console.log('[API] topicStats:', agentOutput.monitoring?.by_topic);
+        console.log('[API] monitoring keys:', Object.keys(agentOutput.monitoring || {}));
+
+        // Polish 6: Analytics log on success
+        console.log('[Extract Flow]', {
+          event: 'success',
+          retries: retryCountRef.current,
+          finalStatus: state.status,
+          solved: state.agentOutput?.metrics?.total_accepted,
+          timestamp: new Date().toISOString()
+        });
 
         // Stop polling explicitly
         setIsPolling(false);
@@ -405,7 +535,7 @@ export function AppProvider({ children }) {
         // Build data object for hasData check
         const dataObj = {
           user: sanitizedUserId,
-          weak_topics: state.goals?.map(g => ({
+          weak_topics: mappedState.goals?.map(g => ({
             topic: g.topic,
             confidence: g.current_score,
             score: g.current_score,
@@ -413,14 +543,14 @@ export function AppProvider({ children }) {
             strategy: `Focus on ${g.topic?.toLowerCase()} patterns`,
             evidence: [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
           })) || [],
-          recommended_problems: state.recommendations,
-          agentic: state
+          recommended_problems: mappedState.recommendations || [],
+          agentic: mappedState
         };
         setData(dataObj);
         localStorage.setItem('debugmind_data', JSON.stringify(dataObj));
 
         console.log('[AppContext] ✓ Data from agent state', {
-          recommendationsCount: state.recommendations.length
+          recommendationsCount: state.recommendations?.length || 0
         });
 
         // Add notification
@@ -443,12 +573,18 @@ export function AppProvider({ children }) {
       } else if (state.status === 'no_data') {
         console.log('[UI] No data yet for user:', sanitizedUserId);
         setDataStatus('no_data');
+        setLoading(false);
+        setLoadingMessage('');
         return null;
       }
 
+      setLoading(false);
+      setLoadingMessage('');
       return null;
     } catch (e) {
-      console.error('[UI] Failed to fetch agent state:', e);
+      console.warn("[UI] Backend temporarily unavailable, retrying...", e.message);
+      // Wait 1.5s and retry, don't kill the polling loop
+      setTimeout(() => fetchAgentState(sanitizedUserId, force), 1500);
       return null;
     }
   }, []);
@@ -535,23 +671,48 @@ export function AppProvider({ children }) {
   // Extract latest data (for dashboard button)
   const extractLatestData = useCallback(async () => {
     if (!user) return null;
+
+    // STEP 10: Prevent multiple polling loops
+    if (isPollingRef.current) {
+      console.log('[AppContext] Polling already active, skipping duplicate extract');
+      return { success: true };
+    }
     
     setLoading(true);
+    setLoadingMessage('Analyzing your latest submissions...'); // STEP 7
     setDataStatus('unknown');
     dataFoundRef.current = false;
+    retryCountRef.current = 0;
     
     try {
       // Trigger extract via analyze endpoint
       await analyze(`https://leetcode.com/u/${user}`);
       setIsPolling(true);
+
+      // STEP 3+10: Start state-driven polling immediately
+      isPollingRef.current = true;
+      setLoadingMessage('Processing your progress...'); // STEP 7
+      
+      // STEP 7: Force refresh AFTER extraction initiated
+      await fetchAgentState(user, true);
+
       return { success: true };
     } catch (err) {
       console.error('[AppContext] Extract failed:', err);
-      return { success: false, error: err.message };
-    } finally {
       setLoading(false);
+      setLoadingMessage('');
+      isPollingRef.current = false;
+      return { success: false, error: err.message };
     }
-  }, [user, analyze]);
+  }, [user, analyze, fetchAgentState]);
+
+  // Polish 1: Cancel polling on unmount/navigation
+  useEffect(() => {
+    return () => {
+      isPollingRef.current = false;
+      retryCountRef.current = 0;
+    };
+  }, []);
 
   // Load cached data on mount
   useEffect(() => {
@@ -610,6 +771,8 @@ export function AppProvider({ children }) {
       console.log('[AppContext] Cleaning up polling interval');
       clearInterval(interval);
       clearTimeout(safetyTimeout);
+      // Polish 1: Stop polling ref on cleanup
+      isPollingRef.current = false;
     };
   }, [user, isPolling, fetchAgentState]);
 
@@ -626,6 +789,7 @@ export function AppProvider({ children }) {
     agentState,
     codeAnalysis,
     loading,
+    loadingMessage, // STEP 7: Exposed for Dashboard UI
     error,
     isPolling,
     dataStatus,

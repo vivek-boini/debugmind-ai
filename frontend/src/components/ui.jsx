@@ -269,59 +269,112 @@ export const DecisionTimeline = ({ decisions }) => {
 // --- Confidence Chart Component ---
 
 export const ConfidenceChart = ({ chartData, overallTrend }) => {
-  if (!chartData || !chartData.datasets || chartData.datasets.length === 0) {
+  // FIX 15: Protect chart — catch any data issues
+  try {
+    // FIX 4: Proper empty chart state
+    if (!chartData || !chartData.datasets || chartData.datasets.length === 0) {
+      return (
+        <Card className="h-64 flex items-center justify-center">
+          <div className="text-center text-slate-500">
+            <BarChart3 size={32} className="mx-auto mb-3 opacity-30" />
+            <p className="text-sm font-medium">No progress data yet.</p>
+            <p className="text-xs mt-1 text-slate-600">Solve problems and extract again to track improvement.</p>
+          </div>
+        </Card>
+      );
+    }
+
+    const primaryData = chartData.datasets[0]?.data || [];
+    
+    // FIX 15: Guard against empty/invalid data
+    if (!Array.isArray(primaryData) || primaryData.length < 2) {
+      return (
+        <Card className="h-64 flex items-center justify-center">
+          <div className="text-center text-slate-500">
+            <BarChart3 size={32} className="mx-auto mb-3 opacity-30" />
+            <p className="text-sm font-medium">No progress data yet.</p>
+            <p className="text-xs mt-1 text-slate-600">Solve problems and extract again to track improvement.</p>
+          </div>
+        </Card>
+      );
+    }
+
+    // FIX 15: Sanitize data values to prevent NaN/Infinity crashes
+    const sanitizedData = primaryData.map(v => {
+      const num = Number(v);
+      return isNaN(num) || !isFinite(num) ? 0 : num;
+    });
+
+    // FIX 4: Handle case where data is all zeros
+    if (sanitizedData.every(v => v === 0)) {
+      return (
+        <Card className="h-64 flex items-center justify-center">
+          <div className="text-center text-slate-500">
+            <BarChart3 size={32} className="mx-auto mb-3 opacity-30" />
+            <p className="text-sm font-medium">No progress data yet.</p>
+            <p className="text-xs mt-1 text-slate-600">Solve problems and extract again to track improvement.</p>
+          </div>
+        </Card>
+      );
+    }
+
+    const maxValue = Math.max(...sanitizedData, 100);
+
+    // FIX 13: Only show trend when enough data points
+    const showTrendBadge = overallTrend && sanitizedData.length >= 2 && overallTrend.direction;
+
+    return (
+      <Card>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold flex items-center gap-2">
+            <TrendingUp size={18} className="text-accent-teal" />
+            Confidence Trend
+          </h3>
+          {showTrendBadge && (
+            <div className="flex items-center gap-1">
+              {overallTrend.direction?.includes('improving') ? (
+                <ArrowUpRight size={14} className="text-emerald-400" />
+              ) : overallTrend.direction?.includes('declining') ? (
+                <ArrowDownRight size={14} className="text-red-400" />
+              ) : (
+                <Minus size={14} className="text-slate-400" />
+              )}
+              <span className="text-xs text-slate-400">{overallTrend.message}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="h-40 flex items-end gap-1">
+          {sanitizedData.map((value, idx) => (
+            <div key={idx} className="flex-1 flex flex-col items-center gap-1 group">
+              <div className="relative w-full">
+                <div
+                  className="w-full bg-accent-purple/30 rounded-t transition-all duration-300 group-hover:bg-accent-purple/50"
+                  style={{ height: `${(value / maxValue) * 120}px` }}
+                />
+                <div className="absolute -top-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <span className="text-[10px] bg-slate-800 px-1 rounded">{value}%</span>
+                </div>
+              </div>
+              <span className="text-[9px] text-slate-600">{chartData.labels?.[idx] || idx + 1}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+    );
+  } catch (err) {
+    // FIX 15: Catch any rendering errors to prevent crash
+    console.error('[ConfidenceChart] Render error:', err);
     return (
       <Card className="h-64 flex items-center justify-center">
         <div className="text-center text-slate-500">
-          <BarChart3 size={32} className="mx-auto mb-2 opacity-30" />
-          <p className="text-sm">No confidence data yet</p>
+          <BarChart3 size={32} className="mx-auto mb-3 opacity-30" />
+          <p className="text-sm font-medium">Chart unavailable</p>
+          <p className="text-xs mt-1 text-slate-600">Data format issue detected. Try extracting again.</p>
         </div>
       </Card>
     );
   }
-
-  const primaryData = chartData.datasets[0]?.data || [];
-  const maxValue = Math.max(...primaryData, 100);
-
-  return (
-    <Card>
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="font-bold flex items-center gap-2">
-          <TrendingUp size={18} className="text-accent-teal" />
-          Confidence Trend
-        </h3>
-        {overallTrend && (
-          <div className="flex items-center gap-1">
-            {overallTrend.direction?.includes('improving') ? (
-              <ArrowUpRight size={14} className="text-emerald-400" />
-            ) : overallTrend.direction?.includes('declining') ? (
-              <ArrowDownRight size={14} className="text-red-400" />
-            ) : (
-              <Minus size={14} className="text-slate-400" />
-            )}
-            <span className="text-xs text-slate-400">{overallTrend.message}</span>
-          </div>
-        )}
-      </div>
-
-      <div className="h-40 flex items-end gap-1">
-        {primaryData.map((value, idx) => (
-          <div key={idx} className="flex-1 flex flex-col items-center gap-1 group">
-            <div className="relative w-full">
-              <div
-                className="w-full bg-accent-purple/30 rounded-t transition-all duration-300 group-hover:bg-accent-purple/50"
-                style={{ height: `${(value / maxValue) * 120}px` }}
-              />
-              <div className="absolute -top-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
-                <span className="text-[10px] bg-slate-800 px-1 rounded">{value}%</span>
-              </div>
-            </div>
-            <span className="text-[9px] text-slate-600">{chartData.labels?.[idx] || idx + 1}</span>
-          </div>
-        ))}
-      </div>
-    </Card>
-  );
 };
 
 // --- Agent Loop Indicator ---
@@ -641,11 +694,65 @@ export const LearningPlan = ({ plan, onAdvanceDay }) => {
   );
 };
 
-// --- Progress Tracker ---
+// --- Progress Tracker (FIX 10, 11, 13) ---
 
 export const ProgressTracker = ({ progress, metrics }) => {
-  const successRate = progress?.progress?.success_rate || 0;
+  // FIX 10: Normalize data, don't silently mask
+  const accepted = Number(progress?.progress?.accepted || 0);
+  const attempts = Number(progress?.progress?.attempts || 0);
+  const failed = attempts - accepted;
   const trend = progress?.trend;
+
+  // FIX 10: Warn on invalid data, don't hide
+  if (accepted < 0 || attempts < 0) {
+    console.warn('[ProgressTracker] Invalid data detected:', { accepted, attempts });
+  }
+  if (failed < 0) {
+    console.warn('[ProgressTracker] More accepted than attempts:', { accepted, attempts });
+  }
+
+  // FIX 11+16: Clear no-data vs low performance with consistent formatting
+  let successRate, showPercentage;
+  if (attempts === 0) {
+    successRate = 0;
+    showPercentage = false;
+  } else {
+    successRate = (accepted / attempts) * 100;
+    showPercentage = true;
+  }
+
+  // FIX 13: Strict trend guard — need both sufficient data AND valid change value
+  const dataPoints = attempts;
+  const trendChange = trend?.change;
+  const showTrend = dataPoints >= 2 
+    && trend 
+    && trend.direction !== 'insufficient_data' 
+    && typeof trendChange === 'number';
+
+  // FIX 18: Dynamic status with consistent colors
+  let statusLabel, statusType, statusEmoji;
+
+  if (dataPoints === 0) {
+    statusLabel = 'No Data';
+    statusType = 'neutral';
+    statusEmoji = '📊';
+  } else if (!showTrend) {
+    statusLabel = 'Getting Started';
+    statusType = 'neutral';
+    statusEmoji = '🚀';
+  } else if (trend.direction?.includes('improving')) {
+    statusLabel = 'Improving';
+    statusType = 'success';
+    statusEmoji = '📈';
+  } else if (trend.direction?.includes('declining')) {
+    statusLabel = 'Needs Attention';
+    statusType = 'danger'; // FIX 18: red, not amber
+    statusEmoji = '⚠️';
+  } else {
+    statusLabel = 'Stable';
+    statusType = 'info'; // FIX 18: blue for stable
+    statusEmoji = '⚖️';
+  }
 
   return (
     <Card>
@@ -654,8 +761,8 @@ export const ProgressTracker = ({ progress, metrics }) => {
           <TrendingUp size={18} className="text-emerald-400" />
           Progress
         </h3>
-        <Badge type={progress?.status === 'improving' ? 'success' : progress?.status === 'struggling' ? 'danger' : 'neutral'}>
-          {progress?.status_emoji} {progress?.status?.replace('_', ' ') || 'N/A'}
+        <Badge type={statusType}>
+          {statusEmoji} {statusLabel}
         </Badge>
       </div>
 
@@ -663,33 +770,54 @@ export const ProgressTracker = ({ progress, metrics }) => {
         <div className="relative w-20 h-20">
           <svg className="w-full h-full -rotate-90">
             <circle cx="40" cy="40" r="32" fill="none" stroke="#1e293b" strokeWidth="6" />
-            <circle cx="40" cy="40" r="32" fill="none"
-              stroke={successRate >= 70 ? '#10b981' : successRate >= 50 ? '#4ad9c8' : '#ef4444'}
-              strokeWidth="6" strokeDasharray={`${successRate * 2.01} 201`} strokeLinecap="round" />
+            {/* Only show progress arc when there's data */}
+            {showPercentage && (
+              <circle cx="40" cy="40" r="32" fill="none"
+                stroke={successRate >= 70 ? '#10b981' : successRate >= 40 ? '#4ad9c8' : '#ef4444'}
+                strokeWidth="6" strokeDasharray={`${Math.round(successRate) * 2.01} 201`} strokeLinecap="round" />
+            )}
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <span className="text-xl font-bold">{successRate}%</span>
+            {/* FIX 16: Consistent percentage formatting */}
+            <span className="text-xl font-bold">
+              {showPercentage ? `${successRate.toFixed(1)}%` : '—'}
+            </span>
           </div>
         </div>
 
         <div className="flex-1 space-y-2">
+          {/* FIX 10: Show actual values, warn if invalid */}
           <div className="flex justify-between text-xs">
-            <span className="text-slate-400">Accepted</span>
-            <span className="font-bold text-emerald-400">{progress?.progress?.accepted || 0}</span>
+            <span className="text-slate-400">✔ Solved</span>
+            <span className="font-bold text-emerald-400">{accepted}</span>
           </div>
           <div className="flex justify-between text-xs">
-            <span className="text-slate-400">Attempts</span>
-            <span className="font-bold">{progress?.progress?.attempts || 0}</span>
+            <span className="text-slate-400">✖ Failed</span>
+            <span className={`font-bold ${failed < 0 ? 'text-amber-400' : 'text-red-400'}`}>
+              {failed < 0 ? `⚠ ${failed}` : failed}
+            </span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-slate-400">Total</span>
+            <span className="font-bold">{attempts}</span>
           </div>
         </div>
       </div>
 
-      {trend && trend.direction !== 'insufficient_data' && (
+      {/* FIX 13: Only show trend when strictly valid */}
+      {showTrend && (
         <div className="p-2 bg-dark-900/50 rounded-lg text-xs flex items-center gap-2">
           {trend.direction?.includes('improving') ? <ArrowUpRight size={14} className="text-emerald-400" /> :
             trend.direction?.includes('declining') ? <ArrowDownRight size={14} className="text-red-400" /> :
               <Minus size={14} className="text-slate-400" />}
           <span className="text-slate-300">{trend.message}</span>
+        </div>
+      )}
+
+      {/* FIX 13: Explicit insufficient data message */}
+      {!showTrend && dataPoints > 0 && (
+        <div className="p-2 bg-dark-900/50 rounded-lg text-xs text-slate-400">
+          Not enough data to determine trend
         </div>
       )}
     </Card>

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   RefreshCw, BrainCircuit, AlertTriangle, CheckCircle2, 
-  Zap, ListOrdered, ChevronRight, Loader2
+  Zap, ListOrdered, ChevronRight, Loader2, Clock
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { WaitingForData, EmptyState } from '../components/Loader';
@@ -11,8 +11,8 @@ import {
   DecisionTimeline, AgentLoopIndicator, ProgressTracker, AdaptationPanel
 } from '../components/ui';
 
-// Floating Extract Button Component
-const FloatingExtractButton = ({ onClick, isExtracting, success }) => {
+// Floating Extract Button Component — FIX 20 + STEP 8: Micro feedback with loadingMessage
+const FloatingExtractButton = ({ onClick, isExtracting, success, loadingMessage }) => {
   return (
     <button
       onClick={onClick}
@@ -34,12 +34,12 @@ const FloatingExtractButton = ({ onClick, isExtracting, success }) => {
       {success ? (
         <>
           <CheckCircle2 size={18} />
-          Updated ✓
+          Your progress has been updated ✓
         </>
       ) : isExtracting ? (
         <>
           <Loader2 size={18} className="animate-spin" />
-          Extracting...
+          {loadingMessage || 'Analyzing your latest submissions...'}
         </>
       ) : (
         <>
@@ -189,10 +189,23 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const { 
     user, data, agentState, hasData, isWaitingForData, refreshData, 
-    isPolling, setIsPolling, dataStatus, extractLatestData, loading 
+    isPolling, setIsPolling, dataStatus, extractLatestData, loading, loadingMessage,
+    error, clearError, fetchAgentState
   } = useApp();
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractSuccess, setExtractSuccess] = useState(false);
+
+  // Polish 4: timeAgo helper for last updated
+  const timeAgo = (date) => {
+    if (!date) return null;
+    const diff = Date.now() - new Date(date).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins} min ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs} hr ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  };
 
   // Debug logging
   useEffect(() => {
@@ -247,8 +260,9 @@ export default function Dashboard() {
     return Array.from(dedupMap.values());
   }, [data?.weak_topics]);
 
-  // Handle extract latest data
+  // Handle extract latest data — Polish 2: Debounce with loading guard
   const handleExtractLatest = async () => {
+    if (loading || isExtracting) return; // Debounce rapid clicks
     setIsExtracting(true);
     setExtractSuccess(false);
     try {
@@ -278,46 +292,67 @@ export default function Dashboard() {
         <WaitingForData />
         <FloatingExtractButton 
           onClick={handleExtractLatest}
-          isExtracting={isExtracting}
+          isExtracting={isExtracting || loading}
           success={extractSuccess}
+          loadingMessage={loadingMessage}
         />
       </>
     );
   }
 
-  // Show empty state with extract button - don't force extraction
+  // FIX 21: Show empty state with clear action steps
   if (!hasData) {
     console.log('[Dashboard] Showing empty state - no data');
     return (
       <>
-        <EmptyState
-          title="Welcome to DebugMind AI"
-          message="Click 'Extract Latest Data' to analyze your LeetCode profile and get personalized AI insights."
-          icon={BrainCircuit}
-          action={
-            <button 
-              onClick={handleExtractLatest}
-              disabled={isExtracting}
-              className="btn-primary inline-flex items-center gap-2"
-            >
-              {isExtracting ? (
-                <>
-                  <Loader2 size={18} className="animate-spin" />
-                  Extracting...
-                </>
-              ) : (
-                <>
-                  <Zap size={18} />
-                  Extract Latest Data
-                </>
-              )}
-            </button>
-          }
-        />
+        <div className="text-center py-16 animate-in fade-in duration-500">
+          <div className="w-16 h-16 mx-auto mb-6 rounded-2xl bg-slate-800 flex items-center justify-center">
+            <BrainCircuit size={32} className="text-slate-500" />
+          </div>
+          <h3 className="text-xl font-bold mb-2">Welcome to DebugMind AI</h3>
+          <p className="text-slate-400 mb-6 max-w-md mx-auto">
+            We'll analyze your LeetCode submissions and give you personalized AI insights.
+          </p>
+          <div className="max-w-sm mx-auto bg-slate-800/50 rounded-xl p-5 mb-6 text-left">
+            <h4 className="text-sm font-bold text-accent-teal mb-3">How to get started:</h4>
+            <ol className="space-y-2 text-sm text-slate-400">
+              <li className="flex items-start gap-2">
+                <span className="w-5 h-5 rounded-full bg-accent-purple/20 text-accent-purple flex items-center justify-center shrink-0 text-xs font-bold">1</span>
+                Solve a few problems on <a href="https://leetcode.com" target="_blank" rel="noreferrer" className="text-accent-teal hover:underline">LeetCode</a>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="w-5 h-5 rounded-full bg-accent-purple/20 text-accent-purple flex items-center justify-center shrink-0 text-xs font-bold">2</span>
+                Click <strong className="text-white">"Extract Latest Data"</strong> below
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 text-xs font-bold">✓</span>
+                Your dashboard will populate automatically
+              </li>
+            </ol>
+          </div>
+          <button 
+            onClick={handleExtractLatest}
+            disabled={isExtracting}
+            className="btn-primary inline-flex items-center gap-2"
+          >
+            {isExtracting ? (
+              <>
+                <Loader2 size={18} className="animate-spin" />
+                Analyzing your latest submissions...
+              </>
+            ) : (
+              <>
+                <Zap size={18} />
+                Extract Latest Data
+              </>
+            )}
+          </button>
+        </div>
         <FloatingExtractButton 
           onClick={handleExtractLatest}
-          isExtracting={isExtracting}
+          isExtracting={isExtracting || loading}
           success={extractSuccess}
+          loadingMessage={loadingMessage}
         />
       </>
     );
@@ -331,12 +366,41 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      {/* Agent Loop Status */}
-      <AgentLoopIndicator
-        currentStage={agentState?.agent_loop?.current_stage || 'complete'}
-        stageDescription={agentState?.stage_description}
-        isRunning={agentState?.agent_loop?.current_stage !== 'complete' && agentState?.agent_loop?.current_stage !== 'idle'}
-      />
+      {/* Polish 5: Retry on timeout error */}
+      {error && (
+        <div className="mb-4 p-4 bg-red-500/10 border border-red-500/30 rounded-xl flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <AlertTriangle size={18} className="text-red-400" />
+            <span className="text-sm text-red-300">{error}</span>
+          </div>
+          <button
+            onClick={() => { clearError(); fetchAgentState(user); }}
+            className="px-3 py-1.5 text-xs font-medium bg-red-500/20 text-red-300 rounded-lg hover:bg-red-500/30 transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Agent Loop Status — Full width card */}
+      <div className="bg-dark-800/50 border border-dark-700 rounded-xl p-4 w-full">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-300">Agent Loop</h3>
+          {agentState?.lastUpdated && (
+            <span className="text-xs text-slate-500 flex items-center gap-1">
+              <Clock size={12} />
+              Updated {timeAgo(agentState.lastUpdated)}
+            </span>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2 justify-between w-full">
+          <AgentLoopIndicator
+            currentStage={agentState?.agent_loop?.current_stage || 'complete'}
+            stageDescription={agentState?.stage_description}
+            isRunning={agentState?.agent_loop?.current_stage !== 'complete' && agentState?.agent_loop?.current_stage !== 'idle'}
+          />
+        </div>
+      </div>
 
       {/* Enhanced Alerts with Severity */}
       {enhancedAlerts.length > 0 && <EnhancedAlerts alerts={enhancedAlerts} />}
@@ -457,8 +521,9 @@ export default function Dashboard() {
       {/* Floating Extract Button */}
       <FloatingExtractButton 
         onClick={handleExtractLatest}
-        isExtracting={isExtracting}
+        isExtracting={isExtracting || loading}
         success={extractSuccess}
+        loadingMessage={loadingMessage}
       />
     </div>
   );

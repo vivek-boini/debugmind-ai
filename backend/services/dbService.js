@@ -18,6 +18,7 @@ import {
   Action,
   Problem
 } from './mongoModels.js';
+import crypto from 'crypto';
 
 // Track initialization
 let initialized = false;
@@ -241,19 +242,89 @@ function storeSubmissionsBackground(userId, submissions, sessionId) {
  */
 async function storeSubmissionsAwaited(userId, submissions, sessionId) {
   return safeOperation(async () => {
+    // STEP 4: Enrich missing topics before saving to DB
+    for (const sub of submissions) {
+      if (!sub.topics || sub.topics.length === 0) {
+        const titleSlug = sub.titleSlug || sub.title?.toLowerCase().replace(/\s+/g, '-');
+        if (titleSlug) {
+          const problem = await Problem.findOne({ titleSlug }).select('tags topicTags').lean();
+          if (problem) {
+            // STEP 7: Direct topic injection from Problem collection
+            sub.topics = problem.tags || [];
+            if (sub.topics.length === 0 && problem.topicTags) {
+              sub.topics = problem.topicTags.map(t => t.name);
+            }
+            console.log(`[DBService] Injected topics for "${sub.title}":`, sub.topics);
+          }
+        }
+      }
+    }
+
     console.log(`[DBService] Storing ${submissions.length} submissions for ${userId} (awaited)`);
-    const results = await Submission.bulkAddSubmissions(userId, submissions, sessionId);
-    const successful = results.filter(r => r.success).length;
-    const newCount = results.newCount || 0;
-    const skippedCount = results.skippedCount || 0;
-    console.log(`[Dedup] Skipped ${skippedCount} duplicate submissions for ${userId}`);
-    console.log(`[DBService] ✓ Stored ${newCount} NEW submissions (${successful}/${submissions.length} successful)`);
-    // Fix 7: Debug Logging
-    const allDbSubmissions = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
-    const totalDbCount = allDbSubmissions.reduce((acc, doc) => acc + (doc.submissions?.length || 0), 0);
-    console.log(`[DB] Total submissions after insert: ${totalDbCount}`);
     
-    return { total: submissions.length, successful, newCount, results };
+    // Fetch existing submissions for duplicate check
+    const existingDocs = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
+    const existingSubmissions = existingDocs.flatMap(doc => doc.submissions.map(s => ({ ...s, titleSlug: doc.titleSlug })));
+    
+    const uniqueSubmissions = [];
+    let preFilterSkipped = 0;
+
+    for (const submission of submissions) {
+      const titleSlug = (submission.titleSlug || submission.title?.toLowerCase().replace(/\s+/g, '-') || '').toLowerCase().trim();
+      
+      // STEP 1 + 5: Always generate codeHash — never allow undefined
+      const codeStr = submission.code || '';
+      const hashInput = codeStr.length > 0
+        ? codeStr
+        : `${titleSlug}|${submission.timestamp || ''}|${submission.status || submission.statusDisplay || ''}`;
+      const codeHash = crypto.createHash('sha256').update(hashInput).digest('hex');
+      
+      // Attach codeHash to submission for downstream use
+      submission.codeHash = codeHash;
+
+      console.log("[Insert Debug]", { title: submission.title, timestamp: submission.timestamp, codeHash });
+      
+      // STEP 2: STRONG DEDUP — check timestamp OR codeHash match
+      const submissionTimestamp = submission.timestamp
+        ? new Date(submission.timestamp * 1000)
+        : new Date();
+
+      const isDuplicate = existingSubmissions.some(s => {
+        // 1. Same titleSlug + timestamp + status
+        if (s.titleSlug === titleSlug &&
+            s.status === submission.status &&
+            s.timestamp?.getTime() === submissionTimestamp.getTime()) {
+          return true;
+        }
+        // 2. Same titleSlug + codeHash
+        if (s.titleSlug === titleSlug && s.codeHash && s.codeHash === codeHash) {
+          return true;
+        }
+        return false;
+      });
+
+      if (isDuplicate) {
+        preFilterSkipped++;
+      } else {
+        uniqueSubmissions.push(submission);
+      }
+    }
+
+    // STEP 4: Clear dedup logging
+    console.log(`[Dedup] Pre-filter skipped ${preFilterSkipped} duplicates for ${userId}`);
+
+    const results = await Submission.bulkAddSubmissions(userId, uniqueSubmissions, sessionId);
+    const successful = results.filter(r => r.success).length;
+    const totalSkipped = preFilterSkipped + (results.skippedCount || 0);
+    console.log(`[Dedup] Skipped ${totalSkipped} total duplicates for ${userId}`);
+    console.log(`[Insert] Stored ${results.newCount || 0} new submissions (${successful}/${uniqueSubmissions.length} successful)`);
+    
+    // Debug: total in DB after insert
+    const allDbSubmissions = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
+    const totalCount = allDbSubmissions.reduce((acc, doc) => acc + (doc.submissions?.length || 0), 0);
+    console.log("[DB] Total submissions after insert:", totalCount);
+    
+    return { total: submissions.length, successful, newCount: results.newCount || 0, results };
   }, 'storeSubmissionsAwaited');
 }
 
@@ -275,6 +346,21 @@ async function buildProgressStats(userId) {
   return safeOperation(async () => {
     const submissions = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
     
+    // UI-friendly topic display names
+    const UI_TOPIC_MAP = {
+      'sliding-window': 'Sliding Window', 'dp': 'Dynamic Programming',
+      'binary-search': 'Binary Search', 'two-pointers': 'Two Pointers',
+      'arrays': 'Arrays & Hashing', 'linked-list': 'Linked List',
+      'tree': 'Trees', 'binary-tree': 'Trees', 'graph': 'Graphs',
+      'stack': 'Stack & Queue', 'queue': 'Stack & Queue',
+      'backtracking': 'Backtracking', 'greedy': 'Greedy',
+      'heap': 'Heap/Priority Queue', 'hash-table': 'Hash Table',
+      'string': 'String', 'math': 'Math', 'sorting': 'Sorting',
+      'bfs': 'BFS', 'dfs': 'DFS', 'recursion': 'Recursion',
+      'bit-manipulation': 'Bit Manipulation', 'trie': 'Trie',
+      'divide-and-conquer': 'Divide & Conquer', 'other': 'Other'
+    };
+
     let totalAttempts = 0;
     let acceptedCount = 0;
     const topicStats = {};
@@ -289,14 +375,18 @@ async function buildProgressStats(userId) {
       }
       
       const topics = sub.topics || [];
-      topics.forEach(t => {
+      topics.forEach(rawT => {
+        // Normalize to display name
+        const t = UI_TOPIC_MAP[rawT] || rawT;
         if (!topicStats[t]) {
-          topicStats[t] = { attempts: 0, problemsAttempted: 0, problemsSolved: 0 };
+          topicStats[t] = { attempts: 0, total: 0, accepted: 0, problemsAttempted: 0, problemsSolved: 0 };
         }
         topicStats[t].attempts += attempts;
+        topicStats[t].total += attempts;
         topicStats[t].problemsAttempted += 1;
         if (isProblemSolved) {
           topicStats[t].problemsSolved += 1;
+          topicStats[t].accepted += 1;
         }
       });
     });
@@ -306,12 +396,15 @@ async function buildProgressStats(userId) {
     for (const [topic, stats] of Object.entries(topicStats)) {
       if (stats.attempts < 3) insufficientTopics.push(topic);
       topicScores[topic] = stats.problemsAttempted > 0 
-        ? Math.round((stats.problemsSolved / stats.problemsAttempted) * 100) 
+        ? Number(((stats.problemsSolved / stats.problemsAttempted) * 100).toFixed(1))
         : 0;
     }
 
     const totalProblems = submissions.length;
     const successRate = totalProblems > 0 ? Math.round((acceptedCount / totalProblems) * 100) : 0;
+
+    // Debug log
+    console.log('[Topic Stats - DB]', topicScores);
 
     return {
       totalAttempts,
@@ -319,6 +412,7 @@ async function buildProgressStats(userId) {
       totalProblems,
       successRate,
       topicScores,
+      topicStats, // Full stats for topic breakdown
       insufficientTopics
     };
   }, 'buildProgressStats');
@@ -403,7 +497,7 @@ async function storeAgentOutput(userId, sessionId, loopResult) {
 async function getLatestAgentOutput(userId) {
   return safeOperation(async () => {
     return AgentOutput.findOne({ userId: userId.toLowerCase() })
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1, createdAt: -1 })
       .lean();
   }, 'getLatestAgentOutput');
 }
@@ -508,16 +602,111 @@ async function getImprovementTrend(userId) {
       .select('overallStats.successRate createdAt')
       .lean();
     
-    if (snapshots.length < 2) return { trend: 'insufficient_data' };
-    
-    const rates = snapshots.map(s => s.overallStats?.successRate || 0).reverse();
-    const change = rates[rates.length - 1] - rates[0];
-    
+    const count = snapshots.length;
+
+    // Step 1: Handle insufficient data
+    if (count <= 1) {
+      return {
+        trend: 'insufficient_data',
+        change: 0,
+        confidence: 'low',
+        dataPoints: count,
+        history: []
+      };
+    }
+
+    // Reverse to chronological order (oldest first)
+    const chronological = [...snapshots].reverse();
+
+    // Step 1: Use recent window (last N=5) for trend — reduces noise from old data
+    const N = 5;
+    const window = chronological.slice(-N);
+
+    const first = window[0].overallStats?.successRate || 0;
+    const last = window[window.length - 1].overallStats?.successRate || 0;
+    let change = last - first;
+    // Clamp to safe range
+    change = Math.max(-100, Math.min(100, change));
+
+    // Step 2: Stable threshold — ±2% is noise, not a real trend
+    let trend;
+    if (Math.abs(change) < 2) {
+      trend = 'stable';
+    } else if (change > 0) {
+      trend = 'improving';
+    } else {
+      trend = 'declining';
+    }
+
+    // Step 3: Volatility — standard deviation of successive changes
+    const diffs = window.map((s, i) => {
+      if (i === 0) return 0;
+      return (s.overallStats?.successRate || 0) -
+             (window[i - 1].overallStats?.successRate || 0);
+    }).slice(1);
+
+    const mean = diffs.length > 0 ? diffs.reduce((a, b) => a + b, 0) / diffs.length : 0;
+    const variance = diffs.length > 0 ? diffs.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / diffs.length : 0;
+    const volatility = Math.sqrt(variance);
+
+    // Step 4: Strength label
+    let strength = 'weak';
+    if (Math.abs(change) >= 2 && Math.abs(change) < 5) {
+      strength = 'moderate';
+    } else if (Math.abs(change) >= 5) {
+      strength = 'strong';
+    }
+
+    // Confidence based on data points
+    let confidence = 'low';
+    if (count >= 3 && count <= 6) confidence = 'medium';
+    if (count >= 7) confidence = 'high';
+
+    // Lightweight history for charts (no full snapshot objects)
+    const history = chronological.map(s => ({
+      date: new Date(s.createdAt).toISOString().split('T')[0],
+      successRate: s.overallStats?.successRate || 0
+    }));
+
+    const finalChange = Number(change.toFixed(2));
+    const finalVolatility = Number(volatility.toFixed(2));
+
+    // Normalized volatility (0 = perfectly stable, 1 = highly erratic)
+    const volatilityScore = Number(Math.min(1, volatility / 20).toFixed(2));
+
+    // Direction consistency — what % of session-to-session changes were positive
+    const positiveDiffs = diffs.filter(d => d > 0).length;
+    const directionConsistency = diffs.length > 0 ? Number((positiveDiffs / diffs.length).toFixed(2)) : 0;
+
+    // Human-readable explanation
+    const changeAbs = Math.abs(finalChange);
+    const dir = finalChange >= 0 ? 'up' : 'down';
+    let explanation;
+    if (trend === 'stable') {
+      explanation = `Your performance is stable (${finalChange >= 0 ? '+' : ''}${finalChange}%). ${confidence === 'high' ? 'This is a reliable reading.' : 'More sessions will improve accuracy.'}`;
+    } else if (trend === 'improving') {
+      explanation = `You're improving — ${dir} ${changeAbs}% over your last ${window.length} sessions. ${volatilityScore > 0.5 ? 'Progress is inconsistent — try to maintain a steady pace.' : 'Consistent progress — keep it up!'}`;
+    } else if (trend === 'declining') {
+      explanation = `Performance dipped ${changeAbs}% recently. ${directionConsistency < 0.3 ? 'Most sessions showed decline — consider revisiting weak topics.' : 'Some sessions were positive — the decline may be temporary.'}`;
+    } else {
+      explanation = 'Not enough data yet. Complete a few more sessions to see your trend.';
+    }
+
+    // Debug log
+    console.log('[Trend Advanced]', { trend, change: finalChange, confidence, volatility: finalVolatility, strength, volatilityScore, directionConsistency });
+
+    // Final response — all existing fields preserved + new extensions
     return {
-      trend: change > 5 ? 'improving' : change < -5 ? 'declining' : 'stable',
-      change: Math.round(change * 10) / 10,
-      dataPoints: rates.length,
-      history: snapshots.reverse()
+      trend,
+      change: finalChange,
+      confidence,
+      dataPoints: count,
+      history,
+      volatility: finalVolatility,
+      strength,
+      volatilityScore,
+      directionConsistency,
+      explanation
     };
   }, 'getImprovementTrend');
 }
@@ -587,6 +776,12 @@ async function persistExtractData(userId, submissions, loopResult, sessionId) {
     return null;
   }
 
+  // Fix 2: Guard — never overwrite valid data with empty agent output
+  if (!loopResult || !loopResult.goals || loopResult.goals.length === 0) {
+    console.log("[DB] Skipping empty agent output save — no goals produced");
+    return null;
+  }
+
   const startTime = Date.now();
   
   try {
@@ -606,6 +801,14 @@ async function persistExtractData(userId, submissions, loopResult, sessionId) {
       hasNextAction: !!loopResult.next_action,
       submissionsCount: submissions?.length || 0
     });
+
+    // STEP 6: Debug log for Progress Dashboard data
+    console.log('[Progress Debug - Persist]', {
+      metrics: loopResult.metrics,
+      hasConfidenceHistory: !!loopResult.confidence_history,
+      chartDataPoints: loopResult.confidence_history?.chart_data?.datasets?.[0]?.data?.length || 0,
+      hasStrategyEvolution: !!loopResult.strategy_evolution
+    });
     
     // Store agent output (awaited because we need the ID)
     const agentOutput = await storeAgentOutput(userId, sessionId, loopResult);
@@ -624,8 +827,8 @@ async function persistExtractData(userId, submissions, loopResult, sessionId) {
       console.log(`[DB] ✓ Saved analysis to session: ${sessionId}`);
     }
     
-    // AWAIT submissions — LLM pipeline needs them in DB
-    await storeSubmissionsAwaited(userId, submissions, sessionId);
+    // Submissions already stored in index.js before agent loop — DO NOT store again
+    // await storeSubmissionsAwaited(userId, submissions, sessionId);
     // Progress snapshot can run in background (not needed by LLM)
     await createProgressSnapshotBackground(userId, sessionId, loopResult.diagnosis, submissions);
     
@@ -747,10 +950,38 @@ async function loadUserData(userId) {
     
     if (!latestSession) return { user, hasData: false };
     
-    // Get agent output for this session (agentoutputs collection)
-    const agentOutput = await AgentOutput.findOne({
-      sessionId: latestSession.sessionId
-    }).lean();
+    // Step 1: Fetch the LATEST VALID agent output (must have goals + plan + recommendations)
+    let agentOutput = await AgentOutput.findOne({
+      userId: normalizedUserId,
+      goals: { $exists: true, $not: { $size: 0 } },
+      plan: { $exists: true },
+      recommendations: { $exists: true, $not: { $size: 0 } }
+    }).sort({ updatedAt: -1, createdAt: -1 }).lean();
+    
+    // Step 2: Fallback — if no fully valid doc, try the latest one anyway
+    if (!agentOutput) {
+      const fallback = await AgentOutput.findOne({
+        userId: normalizedUserId
+      }).sort({ updatedAt: -1, createdAt: -1 }).lean();
+      
+      if (fallback) {
+        // Step 3: Log that we're using an incomplete fallback
+        console.warn("[DB] Skipping invalid agentOutput, using fallback:", {
+          goals: fallback?.goals?.length || 0,
+          recommendations: fallback?.recommendations?.length || 0,
+          updatedAt: fallback?.updatedAt
+        });
+        agentOutput = fallback;
+      }
+    }
+    
+    // Safety log
+    console.log("[DB] Using agentOutput:", {
+      goals: agentOutput?.goals?.length || 0,
+      recommendations: agentOutput?.recommendations?.length || 0,
+      updatedAt: agentOutput?.updatedAt,
+      sessionId: agentOutput?.sessionId
+    });
     
     // Get active goals from goals collection
     const goals = await Goal.find({
@@ -882,6 +1113,7 @@ export {
   
   // Submissions
   storeSubmissionsBackground,
+  storeSubmissionsAwaited,
   getSubmissionHistory,
   getUserSubmissionStats,
   getAllUserSubmissions,

@@ -13,6 +13,7 @@
  */
 
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -380,6 +381,7 @@ const Session = mongoose.model('Session', sessionSchema);
 
 const submissionEntrySchema = new mongoose.Schema({
   code: String,
+  codeHash: { type: String, required: true },  // STEP 2: Always required for dedup
   runtime: String,
   runtimeMs: Number,
   memory: String,
@@ -440,6 +442,8 @@ const submissionSchema = new mongoose.Schema({
     isSolved: { type: Boolean, default: false },
     attemptsToSolve: Number
   },
+  // Code hash for smart re-analysis detection
+  codeHash: String,
   // LLM Analysis results (LLM-only - no fallback)
   analysis: {
     source: { type: String, enum: ['llm', 'none'], default: 'none' },
@@ -451,6 +455,7 @@ const submissionSchema = new mongoose.Schema({
     improvements: [String],
     patterns: [String],
     improvement: String,      // Single improvement suggestion from GROQ
+    codeHash: String,         // Hash of code at time of analysis (for change detection)
     lastAnalyzedAt: Date
   }
 }, { timestamps: true });
@@ -458,6 +463,16 @@ const submissionSchema = new mongoose.Schema({
 // PRIMARY UNIQUE KEY: userId + titleSlug (NOT problemId)
 submissionSchema.index({ userId: 1, titleSlug: 1 }, { unique: true });
 submissionSchema.index({ userId: 1, 'stats.isSolved': 1 });
+
+// STEP 3: Unique indexes for strict dedup enforcement
+submissionSchema.index(
+  { userId: 1, titleSlug: 1, 'submissions.timestamp': 1 },
+  { name: 'dedup_timestamp' }
+);
+submissionSchema.index(
+  { userId: 1, 'submissions.codeHash': 1 },
+  { name: 'dedup_codehash', sparse: true }
+);
 
 function normalizeStatus(status) {
   if (!status) return 'Other';
@@ -488,6 +503,17 @@ submissionSchema.statics.addSubmission = async function(userId, submissionData, 
   // Keep problemId for backward compatibility, but NOT used for uniqueness
   const problemId = submissionData.id || titleSlug;
   
+  // STEP 1 + STEP 5: ALWAYS generate codeHash — never allow undefined
+  const codeStr = submissionData.code || '';
+  const hashInput = codeStr.length > 0
+    ? codeStr
+    : `${titleSlug}|${submissionData.timestamp || ''}|${submissionData.status || submissionData.statusDisplay || ''}`;
+  const codeHash = crypto.createHash('sha256').update(hashInput).digest('hex');
+
+  const submissionTimestamp = submissionData.timestamp
+    ? new Date(submissionData.timestamp * 1000)
+    : new Date();
+
   const newEntry = {
     code: submissionData.code,
     runtime: submissionData.runtime,
@@ -498,14 +524,15 @@ submissionSchema.statics.addSubmission = async function(userId, submissionData, 
     statusDisplay: submissionData.statusDisplay || submissionData.status,
     language: submissionData.lang || submissionData.language,
     sessionId,
-    timestamp: submissionData.timestamp ? new Date(submissionData.timestamp * 1000) : new Date()
+    timestamp: submissionTimestamp,
+    codeHash  // STEP 5: Always stored
   };
 
   // UPSERT by userId + titleSlug (NOT problemId)
   let doc = await this.findOne({ userId: normalizedUserId, titleSlug });
   
   if (!doc) {
-    // Step 3: Document does NOT exist → CREATE new
+    // Document does NOT exist → CREATE new
     const rawTopics = submissionData.topicTags || submissionData.topics || [];
     const normalizedTopics = normalizeTopics(rawTopics);
     
@@ -519,10 +546,11 @@ submissionSchema.statics.addSubmission = async function(userId, submissionData, 
         'Unknown',
       topics: normalizedTopics,
       topicTags: rawTopics,
-      submissions: []
+      submissions: [],
+      codeHash
     });
   } else {
-    // Step 2: Document exists → PUSH new submission, UPDATE updatedAt
+    // Document exists → PUSH new submission, UPDATE updatedAt
     const newTopics = submissionData.topicTags || submissionData.topics || [];
     if (newTopics.length > 0) {
       const mergedTopics = [...new Set([...doc.topics, ...normalizeTopics(newTopics)])];
@@ -533,28 +561,33 @@ submissionSchema.statics.addSubmission = async function(userId, submissionData, 
       doc.problemId = submissionData.id;
     }
   }
+  // STEP 5: Dedup verification log
+  console.log("[Dedup Check]", {
+    title: submissionData.title,
+    titleSlug,
+    codeHash,
+    existingSubs: doc.submissions.length
+  });
 
-  const codeStr = submissionData.code || '';
-  const codeHash = codeStr.length > 0 ? 
-    require('crypto').createHash('md5').update(codeStr).digest('hex') : 'no-code';
-  
-  // Check for duplicate submission (Fix 1: Robust Duplicate Prevention)
+  // STEP 2: STRONG DEDUP — check codeHash AND timestamp+status
   const isDuplicate = doc.submissions.some(s => {
-    // 1. Exact identical status and code combination
-    if (s.code && codeStr && s.code === codeStr && s.status === newEntry.status) return true;
+    // 1. Same userId + titleSlug + timestamp (within same doc, so userId+titleSlug is implicit)
+    if (s.timestamp?.getTime() === submissionTimestamp.getTime() && s.status === newEntry.status) return true;
     
-    // 2. Exact timestamp and status match
-    if (s.timestamp?.getTime() === newEntry.timestamp?.getTime() && s.status === newEntry.status) return true;
+    // 2. Same codeHash (exact same code or same fallback fingerprint)
+    if (s.codeHash && s.codeHash === codeHash) return true;
+    
+    // 3. Legacy: exact code string match
+    if (s.code && codeStr && s.code === codeStr && s.status === newEntry.status) return true;
     
     return false;
   });
   
   if (!isDuplicate) {
-    // Inject hash for future checks
-    if (!newEntry.codeHash && codeStr) newEntry.codeHash = codeHash;
     doc.submissions.push(newEntry);
+    // Store latest code hash on parent doc for LLM re-analysis detection
+    if (codeStr.length > 0) doc.codeHash = codeHash;
   } else {
-    // Optional logging parameter attached if duplicate
     doc._skippedDuplicate = true;
   }
   
@@ -603,8 +636,11 @@ submissionSchema.statics.bulkAddSubmissions = async function(userId, submissions
   for (const sub of submissions) {
     try {
       const { doc, isNew } = await this.addSubmission(userId, sub, sessionId);
-      if (isNew) newCount++;
-      if (doc && doc._skippedDuplicate) skippedCount++;
+      if (isNew) {
+        newCount++;
+      } else {
+        skippedCount++;
+      }
       
       results.push({ success: true, problemId: doc ? doc.problemId : sub.title, isNew });
     } catch (error) {
@@ -612,7 +648,10 @@ submissionSchema.statics.bulkAddSubmissions = async function(userId, submissions
     }
   }
   
-  // Return skipped metrics too (Fix 10 Logging)
+  // STEP 4: Clear dedup logging
+  console.log(`[Dedup] Skipped ${skippedCount} duplicates`);
+  console.log(`[Insert] Stored ${newCount} new submissions`);
+  
   return Object.assign(results, { newCount, skippedCount });
 };
 
@@ -633,6 +672,8 @@ submissionSchema.statics.upsertAnalysis = async function(userId, titleSlug, anal
     'analysis.improvement': analysisData.improvement || '',
     'analysis.lastAnalyzedAt': analysisData.lastAnalyzedAt || new Date()
   };
+  // Step 2: Store code hash at time of analysis for change detection
+  if (analysisData.codeHash) update['analysis.codeHash'] = analysisData.codeHash;
 
   // Also set legacy fields if provided
   if (analysisData.finalScore != null) update['analysis.finalScore'] = analysisData.finalScore;
@@ -696,6 +737,17 @@ const agentOutputSchema = new mongoose.Schema({
     confidence: Number,
     timestamp: { type: Date, default: Date.now }
   }],
+  // STEP 2: Metrics computed from submissions (for Progress Dashboard)
+  metrics: {
+    total_submissions: { type: Number, default: 0 },
+    total_accepted: { type: Number, default: 0 },
+    success_rate: { type: Number, default: 0 },
+    overall_success_rate: { type: Number, default: 0 }
+  },
+  // STEP 2: Confidence history for chart rendering
+  confidence_history: mongoose.Schema.Types.Mixed,
+  // STEP 2: Strategy evolution tracking
+  strategy_evolution: mongoose.Schema.Types.Mixed,
   processingTime: Number,
   status: {
     type: String,
@@ -705,6 +757,7 @@ const agentOutputSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 agentOutputSchema.index({ userId: 1, createdAt: -1 });
+agentOutputSchema.index({ userId: 1, updatedAt: -1 });
 agentOutputSchema.index({ sessionId: 1 });
 
 /**
@@ -815,7 +868,13 @@ agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionI
     recommendations,
     llmSummary: loopResult.llmSummary || null,
     decisions: loopResult.decisions || [],
-    status: 'completed'
+    // STEP 2: Save metrics, confidence_history, strategy_evolution
+    metrics: loopResult.metrics || {},
+    confidence_history: loopResult.confidence_history || null,
+    strategy_evolution: loopResult.strategy_evolution || null,
+    status: 'completed',
+    // STEP 2: ALWAYS generate fresh timestamp — prevents stale version rejection
+    updatedAt: new Date()
   };
 
   console.log('[DB] Saving AgentOutput:', {
@@ -823,12 +882,14 @@ agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionI
     planDays: loopResult.plan?.plan?.length,
     recommendationsCount: recommendations.length,
     hasNextAction: !!loopResult.next_action,
-    hasDiagnosis: !!loopResult.diagnosis
+    hasDiagnosis: !!loopResult.diagnosis,
+    updatedAt: data.updatedAt.toISOString()
   });
 
-  // UPSERT: update if exists for this session, create if not
+  // Step 5: UPSERT by userId only — ensures single AgentOutput per user
+  // Each new extract overwrites the previous, preventing stale empty docs
   return this.findOneAndUpdate(
-    { userId: normalizedUserId, sessionId },
+    { userId: normalizedUserId },
     { $set: data },
     { new: true, upsert: true }
   );
@@ -1014,12 +1075,26 @@ progressSnapshotSchema.statics.createSnapshot = async function(userId, sessionId
     comparisonToPrevious
   };
 
-  // UPSERT for today's snapshot (Fix 6: Ensure Single Snapshot Per Extract/Day)
-  return this.findOneAndUpdate(
-    { userId: normalizedUserId, createdAt: { $gte: todayStart } },
-    { $set: snapshotData },
-    { new: true, upsert: true }
-  );
+  // CREATE a new snapshot per extract (not upsert) for historical tracking
+  const snapshot = await this.create(snapshotData);
+
+  // Step 3: Cleanup — keep only last 20 snapshots per user to avoid DB bloat
+  const keepIds = await this.find({ userId: normalizedUserId })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .distinct('_id');
+
+  if (keepIds.length >= 20) {
+    const deleted = await this.deleteMany({
+      userId: normalizedUserId,
+      _id: { $nin: keepIds }
+    });
+    if (deleted.deletedCount > 0) {
+      console.log(`[DB] Cleaned up ${deleted.deletedCount} old snapshots for ${normalizedUserId}`);
+    }
+  }
+
+  return snapshot;
 };
 
 const ProgressSnapshot = mongoose.model('ProgressSnapshot', progressSnapshotSchema);

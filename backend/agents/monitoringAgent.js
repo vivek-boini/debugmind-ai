@@ -28,7 +28,7 @@ const MIN_SUBMISSIONS_FOR_TREND = 5;
 function normalizeStatus(status) {
   if (!status) return 'Other';
   const s = status.toLowerCase();
-  if (s.includes('accepted')) return 'Accepted';
+  if (s.includes('accepted') || s === 'ac') return 'Accepted';
   if (s.includes('wrong')) return 'Wrong Answer';
   if (s.includes('time limit') || s.includes('tle')) return 'Time Limit Exceeded';
   if (s.includes('runtime')) return 'Runtime Error';
@@ -36,6 +36,51 @@ function normalizeStatus(status) {
   if (s.includes('compile')) return 'Compile Error';
   return 'Other';
 }
+
+// STEP 1: Robust accepted status check (handles all variants)
+const isAccepted = (status) => {
+  return ["Accepted", "accepted", "AC", "ac"].includes(status);
+};
+
+// STEP 2: Strong topic normalization
+const normalizeTopic = (topic) => {
+  if (!topic) return null;
+
+  const t = topic.toLowerCase().replace(/[-_]/g, " ").trim();
+
+  if (t.includes("sliding window")) return "Sliding Window";
+  if (t.includes("dynamic programming") || t === "dp") return "Dynamic Programming";
+  if (t.includes("array")) return "Arrays & Hashing";
+
+  return topic;
+};
+
+// STEP 3: Infer topics from problem title (fallback when DB tags missing)
+const inferTopicsFromTitle = (title) => {
+  if (!title) return [];
+  const t = title.toLowerCase();
+
+  const topics = [];
+
+  if (
+    t.includes("substring") ||
+    t.includes("subarray") ||
+    t.includes("window")
+  ) {
+    topics.push("Sliding Window");
+  }
+
+  if (
+    t.includes("dp") ||
+    t.includes("path") ||
+    t.includes("sequence") ||
+    t.includes("climbing")
+  ) {
+    topics.push("Dynamic Programming");
+  }
+
+  return topics;
+};
 
 /**
  * Calculate success rate from submissions
@@ -628,49 +673,146 @@ function getStatusEmoji(status) {
 }
 
 /**
+ * UI-friendly topic display names
+ */
+const UI_TOPIC_MAP = {
+  'sliding window': 'Sliding Window',
+  'slidingwindow': 'Sliding Window',
+  'dynamic programming': 'Dynamic Programming',
+  'dp': 'Dynamic Programming',
+  'binary search': 'Binary Search',
+  'binarysearch': 'Binary Search',
+  'two pointers': 'Two Pointers',
+  'twopointers': 'Two Pointers',
+  'two pointer': 'Two Pointers',
+  'arrays & hashing': 'Arrays & Hashing',
+  'arrays': 'Arrays & Hashing',
+  'linked list': 'Linked List',
+  'linkedlist': 'Linked List',
+  'trees': 'Trees',
+  'binary tree': 'Trees',
+  'graphs': 'Graphs',
+  'graph': 'Graphs',
+  'stack & queue': 'Stack & Queue',
+  'stack': 'Stack & Queue',
+  'backtracking': 'Backtracking',
+  'greedy': 'Greedy',
+  'heap/priority queue': 'Heap/Priority Queue',
+  'heap': 'Heap/Priority Queue',
+  'bit manipulation': 'Bit Manipulation',
+  'math & geometry': 'Math & Geometry',
+  'general problem solving': 'General'
+};
+
+/**
+ * Normalize a topic key to its UI display name
+ */
+function normalizeTopicDisplay(topic) {
+  if (!topic) return 'General';
+  const lower = topic.toLowerCase().trim();
+  return UI_TOPIC_MAP[lower] || topic; // Preserve original casing if no mapping
+}
+
+/**
  * Analyze submissions by topic with enhanced metrics
+ * Uses DB tags + title inference + normalization for comprehensive, accurate coverage
  */
 function analyzeByTopic(submissions, classifyProblem) {
-  if (!classifyProblem) return {};
-
   const byTopic = {};
+
   submissions.forEach(sub => {
-    const topic = classifyProblem(sub.title);
-    const status = normalizeStatus(sub.statusDisplay || sub.status);
-    
-    if (!byTopic[topic]) {
-      byTopic[topic] = { 
-        attempts: 0, 
-        accepted: 0,
-        error_types: {},
-        problems: new Set()
-      };
+    // STEP 4: Merge DB topics + inferred topics from title
+    let topics = sub.topics || [];
+
+    if (!topics.length) {
+      topics = inferTopicsFromTitle(sub.title);
     }
-    byTopic[topic].attempts++;
-    byTopic[topic].problems.add(sub.title);
-    
-    if (status === 'Accepted') {
-      byTopic[topic].accepted++;
-    } else {
-      byTopic[topic].error_types[status] = (byTopic[topic].error_types[status] || 0) + 1;
+
+    // Merge both safely — normalize + deduplicate
+    topics = [...new Set([
+      ...topics.map(normalizeTopic),
+      ...inferTopicsFromTitle(sub.title)
+    ])].filter(Boolean);
+
+    // Fallback to classifyProblem heuristic
+    if (topics.length === 0 && classifyProblem) {
+      const heuristic = classifyProblem(sub.title);
+      if (heuristic) topics.push(heuristic);
     }
+
+    if (topics.length === 0) {
+      topics.push('General');
+    }
+
+    // STEP 6: Debug log per submission (MANDATORY)
+    console.log("[Topic Debug]", {
+      title: sub.title,
+      topics,
+      status: sub.status,
+      accepted: isAccepted(sub.statusDisplay || sub.status)
+    });
+
+    topics.forEach(topic => {
+      const key = normalizeTopicDisplay(topic);
+
+      // STEP 5: ALWAYS ensure total exists
+      if (!byTopic[key]) {
+        byTopic[key] = {
+          total: 0,
+          attempts: 0,      // keep attempts for backwards compat
+          accepted: 0,
+          error_types: {},
+          problems: new Set()
+        };
+      }
+
+      byTopic[key].total += 1;
+      byTopic[key].attempts += 1;
+      byTopic[key].problems.add(sub.title);
+
+      // STEP 1: Use isAccepted for robust status checking
+      if (isAccepted(sub.statusDisplay || sub.status)) {
+        byTopic[key].accepted += 1;
+      } else {
+        const status = normalizeStatus(sub.statusDisplay || sub.status);
+        byTopic[key].error_types[status] = (byTopic[key].error_types[status] || 0) + 1;
+      }
+    });
   });
 
   // Calculate rates and insights
-  Object.keys(byTopic).forEach(topic => {
-    const data = byTopic[topic];
-    data.success_rate = Math.round((data.accepted / data.attempts) * 100);
+  Object.keys(byTopic).forEach(key => {
+    const data = byTopic[key];
+
+    // STEP 8: FINAL SAFETY FIX — accepted can never exceed total
+    if (data.accepted > data.total) {
+      data.accepted = data.total;
+    }
+
+    data.success_rate = data.total > 0
+      ? Number(((data.accepted / data.total) * 100).toFixed(1))
+      : 0;
+
+    // The UI now reads successRate, so provide both for compatibility
+    data.successRate = data.success_rate;
+
     data.unique_problems = data.problems.size;
     data.dominant_error = Object.entries(data.error_types)
       .sort((a, b) => b[1] - a[1])[0]?.[0] || null;
     data.insight = generateTopicInsight(
-      topic, 
-      data.accepted, 
-      data.attempts - data.accepted,
+      key,
+      data.accepted,
+      data.total - data.accepted,
       data.dominant_error ? [data.dominant_error, data.error_types[data.dominant_error]] : null
     );
     delete data.problems; // Remove Set before returning
   });
+
+  console.log('[Topic Stats calculated]', Object.fromEntries(
+    Object.entries(byTopic).map(([k, v]) => [k, {
+      total: v.total, accepted: v.accepted, successRate: v.success_rate
+    }])
+  ));
 
   return byTopic;
 }
