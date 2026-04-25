@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { 
   TrendingUp, TrendingDown, Clock, Activity, ArrowRight, Minus, 
   Zap, Target, BarChart3, CheckCircle2, XCircle, AlertTriangle,
-  ArrowUpRight, Loader2
+  ArrowUpRight, Loader2, Layers3
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { EmptyState } from '../components/Loader';
@@ -89,6 +89,42 @@ function getPercentBarColor(rate) {
   if (rate >= 70) return '#10b981';
   if (rate >= 40) return '#f59e0b';
   return '#ef4444';
+}
+
+function getPerformanceBand(successRate) {
+  if (successRate > 80) return 'Strong';
+  if (successRate >= 60) return 'Improving';
+  if (successRate >= 30) return 'Needs Practice';
+  return 'Focus Area';
+}
+
+function getPerformanceBandBadgeType(successRate) {
+  if (successRate > 80) return 'success';
+  if (successRate >= 60) return 'info';
+  if (successRate >= 30) return 'warning';
+  return 'danger';
+}
+
+function getTopicTrendDirection(stats, successRate) {
+  const trendValue = stats?.trend;
+  if (typeof trendValue === 'number') {
+    if (trendValue > 0) return 'up';
+    if (trendValue < 0) return 'down';
+    return 'stable';
+  }
+  if (typeof trendValue === 'string') {
+    const normalized = trendValue.toLowerCase();
+    if (normalized.includes('improv') || normalized.includes('up')) return 'up';
+    if (normalized.includes('declin') || normalized.includes('down')) return 'down';
+  }
+  if (stats?.error_types && Object.keys(stats.error_types).length > 0 && successRate < 40) return 'down';
+  return 'stable';
+}
+
+function getTrendDisplay(direction) {
+  if (direction === 'up') return { symbol: '↑', label: 'improving', color: 'text-emerald-400' };
+  if (direction === 'down') return { symbol: '↓', label: 'declining', color: 'text-red-400' };
+  return { symbol: '→', label: 'stable', color: 'text-slate-400' };
 }
 
 // ── Learning Velocity Card (FIX 1, 16, 18) ──
@@ -220,7 +256,7 @@ const TopicBreakdown = ({ byTopic }) => {
           // FIX 10: Normalize, don't silently fix
           const accepted = normalizeCount(stats.accepted, `${topic}.accepted`);
           const total = normalizeCount(stats.total, `${topic}.total`);
-          const failed = total - accepted;
+          const failed = Math.max(0, total - accepted);
 
           // FIX 11: Clear distinction — no data vs low performance
           let successRate, showPercentage, label;
@@ -235,16 +271,13 @@ const TopicBreakdown = ({ byTopic }) => {
             label = `${successRate}% success rate`;
           }
 
-          // FIX 3: Clean topic messages
-          let topicMessage;
-          if (total === 0) {
-            topicMessage = "No attempts yet";
-          } else if (successRate >= 70) {
-            topicMessage = "Good progress in this topic";
-          } else if (successRate >= 40) {
-            topicMessage = "Keep practicing to improve consistency";
-          } else {
-            topicMessage = "Focus on basics and solve easier problems";
+          const band = getPerformanceBand(successRate);
+          const trendDirection = getTopicTrendDirection(stats, successRate);
+          const trend = getTrendDisplay(trendDirection);
+          const errorPatternCount = stats.error_types ? Object.keys(stats.error_types).length : 0;
+          let footerText = `${accepted} of ${total} solved in this topic`;
+          if (errorPatternCount > 0) {
+            footerText = `${errorPatternCount} recent wrong-answer pattern${errorPatternCount > 1 ? 's' : ''} detected`;
           }
 
           // FIX 10: Warn if data looks wrong (negative values)
@@ -253,9 +286,9 @@ const TopicBreakdown = ({ byTopic }) => {
           }
           
           return (
-            <Card key={topic} className="p-4">
+            <Card key={topic} className="p-4 flex flex-col h-full min-h-[210px]">
               <div className="flex items-center justify-between mb-3">
-                <h4 className="font-semibold text-sm truncate">{topic}</h4>
+                <h4 className="font-semibold text-sm truncate pr-2">{topic}</h4>
                 {/* FIX 11: Show % only when there's data, show "—" otherwise */}
                 {showPercentage ? (
                   <span className={`text-sm font-bold ${
@@ -268,33 +301,39 @@ const TopicBreakdown = ({ byTopic }) => {
                   <span className="text-sm text-slate-500">—</span>
                 )}
               </div>
+
+              {showPercentage && (
+                <div className="flex items-center justify-between mb-3">
+                  <Badge type={getPerformanceBandBadgeType(successRate)}>{band}</Badge>
+                  <span className={`text-xs font-semibold ${trend.color}`}>
+                    {trend.symbol} {trend.label}
+                  </span>
+                </div>
+              )}
               
               {showPercentage && (
                 <ProgressBar 
                   value={successRate} 
-                  color={successRate >= 70 ? '#10b981' : successRate >= 40 ? '#f59e0b' : '#ef4444'}
+                  color={getPercentBarColor(successRate)}
                   showLabel={false}
                 />
               )}
 
-              <div className="flex justify-between mt-3 text-xs text-slate-500">
+              <div className="grid grid-cols-3 gap-2 mt-3 text-xs text-slate-500">
                 <div className="flex items-center gap-1">
                   <CheckCircle2 size={12} className="text-emerald-400" />
                   {accepted} solved
                 </div>
                 <div className="flex items-center gap-1">
                   <XCircle size={12} className="text-red-400" />
-                  {/* FIX 10: Show actual value, warn if negative */}
-                  {failed < 0 ? (
-                    <span className="text-amber-400" title="Data inconsistency detected">⚠ {failed}</span>
-                  ) : (
-                    <>{failed} failed</>
-                  )}
+                  {failed} failed
                 </div>
-                <span>{total} total</span>
+                <span className="text-right">{total} total</span>
               </div>
 
-              <p className="text-xs text-slate-400 mt-2 italic">{topicMessage}</p>
+              <p className="text-xs text-slate-400 mt-2 italic">
+                {showPercentage ? `${accepted}/${total} solved • ${formatPercent(successRate)}` : 'No attempts yet'}
+              </p>
 
               {/* Error breakdown if available */}
               {stats.error_types && Object.keys(stats.error_types).length > 0 && (
@@ -309,11 +348,118 @@ const TopicBreakdown = ({ byTopic }) => {
                   </div>
                 </div>
               )}
+
+              <div className="mt-auto pt-3 border-t border-slate-700">
+                <p className="text-xs text-slate-400">{footerText}</p>
+              </div>
             </Card>
           );
         })}
       </div>
     </section>
+  );
+};
+
+const ProgressSummaryBanner = ({ byTopic, metrics }) => {
+  const topicEntries = Object.entries(byTopic || {});
+  const activeTopics = topicEntries.filter(([_, stats]) => normalizeCount(stats?.total, 'topic.total') > 0);
+  const totalSubmissions = normalizeCount(metrics?.total_submissions, 'total_submissions');
+  const totalAccepted = normalizeCount(metrics?.total_accepted, 'total_accepted');
+  const successRate = totalSubmissions > 0 ? Math.round((totalAccepted / totalSubmissions) * 100) : 0;
+  const strongest = activeTopics.length > 0
+    ? activeTopics.reduce((best, current) => {
+        const bestRate = normalizeCount(best[1]?.total, 'best.total') > 0 ? (normalizeCount(best[1]?.accepted, 'best.accepted') / normalizeCount(best[1]?.total, 'best.total')) * 100 : -1;
+        const currentRate = normalizeCount(current[1]?.total, 'current.total') > 0 ? (normalizeCount(current[1]?.accepted, 'current.accepted') / normalizeCount(current[1]?.total, 'current.total')) * 100 : -1;
+        return currentRate > bestRate ? current : best;
+      }, activeTopics[0])[0]
+    : '—';
+  const focus = activeTopics.length > 0
+    ? activeTopics.reduce((worst, current) => {
+        const worstRate = normalizeCount(worst[1]?.total, 'worst.total') > 0 ? (normalizeCount(worst[1]?.accepted, 'worst.accepted') / normalizeCount(worst[1]?.total, 'worst.total')) * 100 : 101;
+        const currentRate = normalizeCount(current[1]?.total, 'focus.total') > 0 ? (normalizeCount(current[1]?.accepted, 'focus.accepted') / normalizeCount(current[1]?.total, 'focus.total')) * 100 : 101;
+        return currentRate < worstRate ? current : worst;
+      }, activeTopics[0])[0]
+    : '—';
+
+  const cards = [
+    { label: 'Overall Success Rate', value: totalSubmissions > 0 ? formatPercent(successRate) : '—' },
+    { label: 'Topics Active', value: `${activeTopics.length}` },
+    { label: 'Strongest Topic', value: strongest },
+    { label: 'Current Focus Topic', value: focus }
+  ];
+
+  return (
+    <section>
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+        {cards.map((item) => (
+          <Card key={item.label} className="p-4">
+            <div className="text-[11px] text-slate-500 uppercase tracking-wide">{item.label}</div>
+            <div className="text-lg font-bold mt-1 truncate">{item.value}</div>
+          </Card>
+        ))}
+      </div>
+    </section>
+  );
+};
+
+const ProgressInsightsPanel = ({ byTopic, metrics, monitoring, recommendations }) => {
+  const entries = Object.entries(byTopic || {}).map(([topic, stats]) => {
+    const accepted = normalizeCount(stats?.accepted, `${topic}.accepted`);
+    const total = normalizeCount(stats?.total, `${topic}.total`);
+    const rate = total > 0 ? Math.round((accepted / total) * 100) : 0;
+    return { topic, accepted, total, failed: Math.max(0, total - accepted), rate };
+  });
+  const active = entries.filter((t) => t.total > 0);
+
+  if (active.length === 0) {
+    return (
+      <Card className="p-5">
+        <h3 className="font-bold flex items-center gap-2 mb-3">
+          <Layers3 size={18} className="text-accent-teal" />
+          Progress Insights
+        </h3>
+        <p className="text-sm text-slate-400">
+          Topic insights will appear after more solved and failed attempts are available in your progress data.
+        </p>
+      </Card>
+    );
+  }
+
+  const strongest = active.reduce((best, curr) => (curr.rate > best.rate ? curr : best), active[0]);
+  const weakest = active.reduce((worst, curr) => (curr.rate < worst.rate ? curr : worst), active[0]);
+  const solvedAtLeastOne = active.filter((t) => t.accepted > 0).length;
+  const totalTopics = entries.length;
+  const coverage = totalTopics > 0 ? Math.round((solvedAtLeastOne / totalTopics) * 100) : 0;
+  const consistencyBase = normalizeCount(metrics?.total_submissions, 'total_submissions');
+  const consistency = consistencyBase > 0
+    ? `${normalizeCount(metrics?.total_accepted, 'total_accepted')} solved across ${consistencyBase} attempts`
+    : (monitoring?.trend?.message || 'More attempts needed for consistency insights');
+
+  const focusRecommendation = recommendations?.[0]?.title || recommendations?.[0] || weakest.topic;
+
+  const insightItems = [
+    { label: 'Strongest Topic', value: `${strongest.topic} (${strongest.rate}%)` },
+    { label: 'Weakest Topic', value: `${weakest.topic} (${weakest.rate}%)` },
+    { label: 'Current Focus Recommendation', value: `${focusRecommendation}` },
+    { label: 'Overall Topic Coverage', value: `${coverage}% (${solvedAtLeastOne}/${totalTopics} topics with solved submissions)` },
+    { label: 'Consistency Summary', value: consistency }
+  ];
+
+  return (
+    <Card className="p-5">
+      <h3 className="font-bold flex items-center gap-2 mb-4">
+        <Layers3 size={18} className="text-accent-teal" />
+        Progress Insights
+      </h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {insightItems.map((item) => (
+          <div key={item.label} className="p-3 rounded-lg bg-slate-800/50 border border-slate-700">
+            <div className="text-[11px] uppercase tracking-wide text-slate-500">{item.label}</div>
+            <p className="text-sm text-slate-200 mt-1">{item.value}</p>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 };
 
@@ -558,22 +704,87 @@ export default function Progress() {
   const chartData = agentState?.confidence_history?.chart_data;
   const overallTrend = agentState?.confidence_history?.overall_trend;
   const lastUpdated = agentState?.lastUpdated;
+  const recommendations = data?.recommended_problems || [];
 
-  // FIX 5: Filter valid timeline entries
-  const stageHistory = useMemo(() => {
+  // Build timeline events from available progress data
+  const activityEvents = useMemo(() => {
     const raw = agentState?.agent_loop?.stage_history || [];
-    // If it's an array of strings (just stage names), skip rendering
-    if (raw.length > 0 && typeof raw[0] === 'string') return [];
-    // Filter entries with valid date/timestamp
-    return raw
+    const stageEvents = (raw.length > 0 && typeof raw[0] === 'string' ? [] : raw)
       .filter(item => item && (item.timestamp || item.date))
       .filter(item => {
         const dateVal = new Date(item.timestamp || item.date);
         return !isNaN(dateVal.getTime());
       })
-      .slice(-8)
+      .map((item) => ({
+        ts: new Date(item.timestamp || item.date).getTime(),
+        text: `AI ${String(item.stage || 'pipeline').replace(/_/g, ' ')} stage updated`
+      }));
+
+    const entries = [...stageEvents];
+    const latestSubmissionTs = Array.isArray(data?.submissionDocs)
+      ? data.submissionDocs
+          .flatMap((doc) => doc?.submissions || [])
+          .map((sub) => new Date(sub.timestamp).getTime())
+          .filter((ts) => !isNaN(ts))
+          .sort((a, b) => b - a)[0]
+      : null;
+    if (latestSubmissionTs) {
+      entries.push({ ts: latestSubmissionTs, text: 'Added new solved/attempted submission data' });
+    }
+
+    const chartPoints = chartData?.datasets?.[0]?.data || [];
+    if (chartPoints.length >= 2) {
+      const last = Number(chartPoints[chartPoints.length - 1] || 0);
+      const prev = Number(chartPoints[chartPoints.length - 2] || 0);
+      if (!isNaN(last) && !isNaN(prev)) {
+        const direction = last > prev ? 'improved' : last < prev ? 'declined' : 'stabilized';
+        entries.push({
+          ts: lastUpdated ? new Date(lastUpdated).getTime() : Date.now(),
+          text: `Confidence trend ${direction} (${Math.round(last)}%)`
+        });
+      }
+    }
+
+    if (normalizeCount(metrics?.total_submissions, 'total_submissions') > 0) {
+      entries.push({
+        ts: lastUpdated ? new Date(lastUpdated).getTime() : Date.now(),
+        text: 'Progress snapshot recorded from latest extraction'
+      });
+    }
+    if (lastUpdated) {
+      const parsed = new Date(lastUpdated).getTime();
+      if (!isNaN(parsed)) {
+        entries.push({ ts: parsed, text: 'Extracted new submissions and updated dashboard state' });
+      }
+    }
+
+    const deduped = entries
+      .filter((e) => typeof e.ts === 'number' && !isNaN(e.ts) && e.text)
+      .sort((a, b) => b.ts - a.ts)
+      .filter((event, index, arr) => arr.findIndex((x) => x.text === event.text) === index)
+      .slice(0, 8);
+
+    if (deduped.length >= 3) return deduped;
+    return [
+      { ts: Date.now(), text: 'First extract completed' },
+      { ts: Date.now() - 1000, text: 'Problems analyzed' },
+      { ts: Date.now() - 2000, text: 'Solve more to unlock trend details' }
+    ];
+  }, [agentState?.agent_loop?.stage_history, chartData, data?.submissionDocs, lastUpdated, metrics?.total_submissions]);
+
+  const topicEntries = useMemo(() => {
+    if (!byTopic || Object.keys(byTopic).length === 0) return [];
+    return Object.entries(byTopic);
+  }, [byTopic]);
+
+  const hasTopicData = topicEntries.length > 0;
+
+  const shouldShowWeakTopicFallback = !hasTopicData && data.weak_topics?.length > 0;
+
+  const stageHistory = useMemo(() => {
+    return activityEvents
       .reverse();
-  }, [agentState?.agent_loop?.stage_history]);
+  }, [activityEvents]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -581,6 +792,8 @@ export default function Progress() {
         <h2 className="text-2xl font-bold">Learning Evolution</h2>
         <p className="text-slate-400">Tracking your mastery over time</p>
       </div>
+
+      <ProgressSummaryBanner byTopic={byTopic} metrics={metrics} />
 
       {/* FIX 7 + 12: Overall Progress Summary with Last Updated */}
       <ProgressSummaryCard 
@@ -656,10 +869,27 @@ export default function Progress() {
       )}
 
       {/* FIX 10 + 11: Topic Progress Breakdown */}
-      <TopicBreakdown byTopic={byTopic} />
+      {hasTopicData ? (
+        <>
+          <TopicBreakdown byTopic={byTopic} />
+          <ProgressInsightsPanel
+            byTopic={byTopic}
+            metrics={metrics}
+            monitoring={monitoring}
+            recommendations={recommendations}
+          />
+        </>
+      ) : (
+        <Card className="p-6 text-center">
+          <h3 className="font-bold mb-2">Topic Performance</h3>
+          <p className="text-sm text-slate-400">
+            Topic cards will populate after topic-level progress data is available.
+          </p>
+        </Card>
+      )}
 
       {/* Weak Topics (fallback) */}
-      {!byTopic && data.weak_topics?.length > 0 && (
+      {shouldShowWeakTopicFallback && (
         <section>
           <h3 className="font-bold mb-4">Topic Progress</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -692,49 +922,32 @@ export default function Progress() {
         </section>
       )}
 
-      {/* FIX 5: Activity Timeline — hide invalid entries */}
-      {stageHistory.length > 0 && (
-        <section>
-          <h3 className="font-bold mb-4 flex items-center gap-2">
-            <Clock size={18} /> Activity Timeline
-          </h3>
-          <div className="space-y-0 relative before:absolute before:left-4 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800">
-            {stageHistory.map((item, i) => {
-              const stage = item.stage || 'Data Extracted';
-              const dateObj = new Date(item.timestamp || item.date);
-              const formattedDate = dateObj.toLocaleDateString(undefined, {
-                year: 'numeric', month: 'short', day: 'numeric',
-                hour: '2-digit', minute: '2-digit'
-              });
+      <section>
+        <h3 className="font-bold mb-4 flex items-center gap-2">
+          <Clock size={18} /> Activity Timeline
+        </h3>
+        <div className="space-y-0 relative before:absolute before:left-4 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800">
+          {stageHistory.slice(-8).map((item, i) => {
+            const dateObj = new Date(item.ts || Date.now());
+            const formattedDate = dateObj.toLocaleDateString(undefined, {
+              year: 'numeric', month: 'short', day: 'numeric',
+              hour: '2-digit', minute: '2-digit'
+            });
 
-              return (
-                <div key={i} className="flex gap-6 pb-6 relative">
-                  <div className="w-8 h-8 rounded-full bg-dark-900 border-2 border-slate-800 flex items-center justify-center z-10">
-                    <Activity size={12} className="text-accent-purple" />
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-sm capitalize">{String(stage).replace(/_/g, ' ')}</h4>
-                    <p className="text-xs text-slate-400">{formattedDate}</p>
-                  </div>
+            return (
+              <div key={`${item.text}-${i}`} className="flex gap-6 pb-6 relative">
+                <div className="w-8 h-8 rounded-full bg-dark-900 border-2 border-slate-800 flex items-center justify-center z-10">
+                  <Activity size={12} className="text-accent-purple" />
                 </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
-
-      {/* Show empty timeline message only if no history at all */}
-      {stageHistory.length === 0 && (
-        <section>
-          <h3 className="font-bold mb-4 flex items-center gap-2">
-            <Clock size={18} /> Activity Timeline
-          </h3>
-          <div className="text-center py-8 text-slate-500">
-            <Activity size={32} className="mx-auto mb-2 opacity-30" />
-            <p className="text-sm">No activity recorded yet</p>
-          </div>
-        </section>
-      )}
+                <div className="min-h-[2.25rem] flex flex-col justify-center">
+                  <h4 className="font-bold text-sm">{item.text}</h4>
+                  <p className="text-xs text-slate-400">{formattedDate}</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }

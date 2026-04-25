@@ -365,7 +365,7 @@ export default function Dashboard() {
   const enhancedAlerts = agentState?.alerts || agentState?.progress?.alerts || [];
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-500">
+    <div className="w-full max-w-none space-y-6 animate-in fade-in duration-500">
       {/* Polish 5: Retry on timeout error */}
       {error && (
         <div className="mb-4 p-4 bg-red-500/10 border border-red-500/30 rounded-xl flex items-center justify-between">
@@ -394,11 +394,13 @@ export default function Dashboard() {
           )}
         </div>
         <div className="flex flex-wrap gap-2 justify-between w-full">
+        <div className="w-full">
           <AgentLoopIndicator
             currentStage={agentState?.agent_loop?.current_stage || 'complete'}
             stageDescription={agentState?.stage_description}
             isRunning={agentState?.agent_loop?.current_stage !== 'complete' && agentState?.agent_loop?.current_stage !== 'idle'}
           />
+        </div>
         </div>
       </div>
 

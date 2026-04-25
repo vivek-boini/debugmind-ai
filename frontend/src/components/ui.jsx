@@ -779,7 +779,7 @@ export const ProgressTracker = ({ progress, metrics }) => {
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
             {/* FIX 16: Consistent percentage formatting */}
-            <span className="text-xl font-bold">
+            <span className="text-[18px] font-bold">
               {showPercentage ? `${successRate.toFixed(1)}%` : '—'}
             </span>
           </div>
