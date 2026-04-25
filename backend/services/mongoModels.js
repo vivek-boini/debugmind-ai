@@ -766,6 +766,7 @@ agentOutputSchema.index({ sessionId: 1 });
  */
 agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionId, loopResult) {
   const normalizedUserId = userId.toLowerCase().trim();
+  const previousOutput = await this.findOne({ userId: normalizedUserId }).lean();
 
   // ============================================
   // BUILD RECOMMENDATIONS: plan problems + similar problems
@@ -854,6 +855,24 @@ agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionI
 
   console.log('[Recommendations] Final count:', recommendations.length);
 
+  const previousChart = previousOutput?.confidence_history?.chart_data?.datasets?.[0]?.data || [];
+  const incomingChart = loopResult?.confidence_history?.chart_data?.datasets?.[0]?.data || [];
+  const shouldAppendHistory = previousChart.length > incomingChart.length && incomingChart.length > 0;
+  const mergedConfidenceHistory = shouldAppendHistory
+    ? {
+        ...(previousOutput?.confidence_history || {}),
+        ...(loopResult?.confidence_history || {}),
+        chart_data: {
+          ...(previousOutput?.confidence_history?.chart_data || {}),
+          ...(loopResult?.confidence_history?.chart_data || {}),
+          datasets: [{
+            ...(loopResult?.confidence_history?.chart_data?.datasets?.[0] || previousOutput?.confidence_history?.chart_data?.datasets?.[0] || {}),
+            data: [...previousChart, ...incomingChart].slice(-30)
+          }]
+        }
+      }
+    : (loopResult?.confidence_history || previousOutput?.confidence_history || null);
+
   const data = {
     userId: normalizedUserId,
     sessionId,
@@ -870,7 +889,7 @@ agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionI
     decisions: loopResult.decisions || [],
     // STEP 2: Save metrics, confidence_history, strategy_evolution
     metrics: loopResult.metrics || {},
-    confidence_history: loopResult.confidence_history || null,
+    confidence_history: mergedConfidenceHistory,
     strategy_evolution: loopResult.strategy_evolution || null,
     status: 'completed',
     // STEP 2: ALWAYS generate fresh timestamp — prevents stale version rejection
@@ -883,6 +902,9 @@ agentOutputSchema.statics.createFromLoopResult = async function(userId, sessionI
     recommendationsCount: recommendations.length,
     hasNextAction: !!loopResult.next_action,
     hasDiagnosis: !!loopResult.diagnosis,
+    previousChartPoints: previousChart.length,
+    incomingChartPoints: incomingChart.length,
+    mergedChartPoints: mergedConfidenceHistory?.chart_data?.datasets?.[0]?.data?.length || 0,
     updatedAt: data.updatedAt.toISOString()
   });
 

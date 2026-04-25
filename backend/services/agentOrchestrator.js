@@ -68,7 +68,8 @@ async function runFullLoop(userId, submissions) {
         title: doc.title,
         titleSlug: doc.titleSlug,
         difficulty: doc.difficulty,
-        topicTags: doc.topics
+        topics: doc.topics || [],
+        topicTags: doc.topics || []
       })));
     }
     // Stage 1: Extract & Store
@@ -227,6 +228,10 @@ async function runFullLoop(userId, submissions) {
     // Embed progress strictly
     monitoring.progress_delta = progressDelta;
     memory.storeProgress(userId, monitoring);
+    console.log('[Topic Recompute]', {
+      layer: 'orchestrator.runFullLoop.monitoring.by_topic',
+      topics: Object.keys(monitoring?.by_topic || {})
+    });
 
     // Log monitoring decision
     const monitorLog = logger.logDecision(userId, {
@@ -827,6 +832,7 @@ async function runEnhancedAgentPipeline(userId, sessionId) {
           lang: sub.lang,
           timestamp: sub.timestamp,
           code: sub.code,
+          topics: problemTags,
           topicTags: problemTags  // Real LeetCode tags for agents
         });
       }
@@ -873,6 +879,10 @@ async function runEnhancedAgentPipeline(userId, sessionId) {
       classifyProblem: agents.classifyProblem
     });
     memory.storeProgress(sanitizedUserId, monitoring);
+    console.log('[Topic Recompute]', {
+      layer: 'orchestrator.runEnhancedAgentPipeline.monitoring.by_topic',
+      topics: Object.keys(monitoring?.by_topic || {})
+    });
 
     const adaptation = agents.adapt({
       monitoring_result: monitoring,

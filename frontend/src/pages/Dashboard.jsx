@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   RefreshCw, BrainCircuit, AlertTriangle, CheckCircle2, 
@@ -10,6 +10,8 @@ import {
   Card, Badge, ProgressBar, SmartAlerts, NextActionCard, StrategyEvolution,
   DecisionTimeline, AgentLoopIndicator, ProgressTracker, AdaptationPanel
 } from '../components/ui';
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
 
 // Floating Extract Button Component — FIX 20 + STEP 8: Micro feedback with loadingMessage
 const FloatingExtractButton = ({ onClick, isExtracting, success, loadingMessage }) => {
@@ -190,10 +192,12 @@ export default function Dashboard() {
   const { 
     user, data, agentState, hasData, isWaitingForData, refreshData, 
     isPolling, setIsPolling, dataStatus, extractLatestData, loading, loadingMessage,
-    error, clearError, fetchAgentState
+    error, clearError, fetchAgentState, syncFreshState
   } = useApp();
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractSuccess, setExtractSuccess] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [progressHistoryData, setProgressHistoryData] = useState({ snapshots: [], trend: null });
 
   // Polish 4: timeAgo helper for last updated
   const timeAgo = (date) => {
@@ -220,6 +224,51 @@ export default function Dashboard() {
     }
   }, [user, navigate]);
 
+  useEffect(() => {
+    if (!user) return;
+    console.log('[Dashboard Refresh]', {
+      event: 'mount-sync',
+      user,
+      incomingUpdatedAt: agentState?.lastUpdated || null,
+      incomingVersion: agentState?.version || null
+    });
+    syncFreshState(user);
+  }, [user, syncFreshState]);
+
+  useEffect(() => {
+    console.log('[Dashboard Refresh]', {
+      event: 'state-change',
+      updatedAt: agentState?.lastUpdated || null,
+      version: agentState?.version || null,
+      byTopicCount: Object.keys(agentState?.progress?.by_topic || {}).length
+    });
+  }, [agentState?.lastUpdated, agentState?.version, agentState?.progress?.by_topic]);
+
+  useEffect(() => {
+    let active = true;
+    if (!user) return;
+
+    const loadProgressHistory = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/progress-history/${user}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!active) return;
+        setProgressHistoryData({
+          snapshots: json?.snapshots || json?.history || [],
+          trend: json?.trend || null
+        });
+      } catch (err) {
+        console.warn('[Dashboard] Failed to fetch progress history:', err?.message);
+      }
+    };
+
+    loadProgressHistory();
+    return () => {
+      active = false;
+    };
+  }, [user, agentState?.lastUpdated]);
+
   // Generate progress trend info
   const metrics = data?.metrics || {};
   const progress = Number(metrics.total_submissions || 0) > 0 
@@ -228,6 +277,23 @@ export default function Dashboard() {
 
   // Process and deduplicate weak topics
   const processedWeakTopics = React.useMemo(() => {
+    const byTopic = agentState?.progress?.by_topic || {};
+    const liveTopics = Object.entries(byTopic).map(([topic, stats]) => {
+      const total = Number(stats?.total ?? stats?.attempts ?? 0);
+      const accepted = Number(stats?.accepted ?? 0);
+      const successRate = Number(
+        stats?.successRate ?? stats?.success_rate ?? (total > 0 ? (accepted / total) * 100 : 0)
+      );
+      return {
+        topic,
+        confidence: Math.round(successRate),
+        score: Math.round(successRate),
+        goal: total > 0 ? `${accepted}/${total} solved` : 'No attempts yet',
+        strategy: stats?.insight || 'Practice to improve this topic'
+      };
+    });
+    if (liveTopics.length > 0) return liveTopics;
+
     const rawTopics = data?.weak_topics || [];
     const dedupMap = new Map();
     
@@ -258,7 +324,94 @@ export default function Dashboard() {
     });
 
     return Array.from(dedupMap.values());
-  }, [data?.weak_topics]);
+  }, [agentState?.progress?.by_topic, data?.weak_topics]);
+
+  // Derive dashboard-side coaching/trend state (must stay above early returns)
+  const adaptationNextSteps = agentState?.adaptation?.next_steps || [];
+  const enhancedAlerts = agentState?.alerts || agentState?.progress?.alerts || [];
+  const monitoringByTopic = agentState?.progress?.by_topic || {};
+  const goalProgress = agentState?.progress?.goal_progress || [];
+  const recommendationItems = agentState?.recommendations || data?.recommended_problems || [];
+  const monitoringTrend = agentState?.progress?.trend || null;
+  const canonicalTrend = useMemo(() => {
+    const t = progressHistoryData?.trend;
+    if (t?.trend) {
+      return {
+        direction: t.trend,
+        change: typeof t.change === 'number' ? t.change : undefined,
+        message: t.explanation || t.trend
+      };
+    }
+    return null;
+  }, [progressHistoryData?.trend]);
+
+  const normalizedProgressForTracker = useMemo(() => ({
+    ...(agentState?.progress || {}),
+    trend: canonicalTrend || {
+      direction: monitoringTrend?.direction || 'insufficient_data',
+      change: typeof monitoringTrend?.change === 'number'
+        ? monitoringTrend.change
+        : (typeof monitoringTrend?.delta === 'number' ? monitoringTrend.delta : undefined),
+      message: monitoringTrend?.message || null
+    }
+  }), [agentState?.progress, canonicalTrend, monitoringTrend]);
+
+  const dashboardNextSteps = useMemo(() => {
+    const isGeneric = (step) => {
+      const text = String(step?.action || step || '').toLowerCase();
+      return text.includes('continue current approach')
+        || text.includes('review your goals')
+        || text.includes('keep going');
+    };
+
+    const hasPlaceholder = adaptationNextSteps.some(isGeneric) || adaptationNextSteps.length === 0;
+    if (!hasPlaceholder) return adaptationNextSteps;
+
+    const steps = [];
+    const weakestTopics = Object.entries(monitoringByTopic)
+      .map(([topic, stats]) => {
+        const total = Number(stats?.total || 0);
+        const accepted = Number(stats?.accepted || 0);
+        const rate = total > 0 ? (accepted / total) * 100 : 101;
+        const errorTypes = stats?.error_types ? Object.entries(stats.error_types) : [];
+        const topError = errorTypes.sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0];
+        return { topic, rate, topError };
+      })
+      .filter((t) => t.rate <= 70)
+      .sort((a, b) => a.rate - b.rate);
+
+    weakestTopics.slice(0, 2).forEach((t, idx) => {
+      const reason = t.topError
+        ? `frequent ${t.topError[0]} signals (${t.topError[1]})`
+        : 'low recent success signals';
+      steps.push({
+        action: `Practice ${t.topic} patterns (${reason})`,
+        priority: idx === 0 ? 'high' : 'medium'
+      });
+    });
+
+    goalProgress
+      .filter((g) => g?.status === 'regressing' || g?.status === 'no_activity')
+      .slice(0, 2)
+      .forEach((g) => {
+        const reason = g?.recommendation || g?.message || 'goal progress is stalled';
+        steps.push({
+          action: `Revisit ${g.topic} goal focus (${reason})`,
+          priority: g?.status === 'regressing' ? 'high' : 'medium'
+        });
+      });
+
+    if (steps.length < 3 && recommendationItems.length > 0) {
+      const rec = recommendationItems[0];
+      const recTopic = rec?.topic || 'priority';
+      steps.push({
+        action: `Solve a ${recTopic} recommendation next (from latest agent suggestions)`,
+        priority: 'medium'
+      });
+    }
+
+    return steps.slice(0, 5);
+  }, [adaptationNextSteps, monitoringByTopic, goalProgress, recommendationItems]);
 
   // Handle extract latest data — Polish 2: Debounce with loading guard
   const handleExtractLatest = async () => {
@@ -360,9 +513,27 @@ export default function Dashboard() {
 
   console.log('[Dashboard] Rendering dashboard with data');
 
-  // Extract adaptation next steps
-  const adaptationNextSteps = agentState?.adaptation?.next_steps || [];
-  const enhancedAlerts = agentState?.alerts || agentState?.progress?.alerts || [];
+  const handleRefreshAnalysis = async () => {
+    if (!user || isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await syncFreshState(user);
+      const res = await fetch(`${API_BASE_URL}/progress-history/${user}`, { cache: 'no-store' });
+      if (res.ok) {
+        const json = await res.json();
+        setProgressHistoryData({
+          snapshots: json?.snapshots || json?.history || [],
+          trend: json?.trend || null
+        });
+      }
+    } catch (err) {
+      console.warn('[Dashboard] Refresh failed:', err?.message);
+      // keep legacy fallback path for resilience
+      refreshData();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   return (
     <div className="w-full max-w-none space-y-6 animate-in fade-in duration-500">
@@ -476,8 +647,8 @@ export default function Dashboard() {
           )}
 
           {/* Next Steps from Adaptation */}
-          {adaptationNextSteps.length > 0 && (
-            <NextStepsCard nextSteps={adaptationNextSteps} />
+          {dashboardNextSteps.length > 0 && (
+            <NextStepsCard nextSteps={dashboardNextSteps} />
           )}
 
           {/* Weak Topics */}
@@ -504,18 +675,20 @@ export default function Dashboard() {
         </div>
 
         <div className="space-y-6">
-          <ProgressTracker progress={agentState?.progress} metrics={agentState?.metrics} />
+          <ProgressTracker progress={normalizedProgressForTracker} metrics={agentState?.metrics} />
           <DecisionTimeline decisions={agentState?.decision_timeline} />
           
           {/* Dynamic Summary */}
           <DynamicSummary data={data} agentState={agentState} />
 
           {/* Refresh Button */}
-          <button 
-            onClick={refreshData} 
+          <button
+            onClick={handleRefreshAnalysis}
+            disabled={isRefreshing}
             className="w-full p-3 rounded-xl border border-slate-700 hover:border-accent-teal hover:bg-accent-teal/5 transition-all flex items-center justify-center gap-2 text-sm"
           >
-            <RefreshCw size={16} /> Refresh Analysis
+            <RefreshCw size={16} className={isRefreshing ? 'animate-spin' : ''} />
+            {isRefreshing ? 'Refreshing...' : 'Refresh Analysis'}
           </button>
         </div>
       </div>

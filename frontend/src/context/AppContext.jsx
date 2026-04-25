@@ -43,6 +43,51 @@ export function AppProvider({ children }) {
   const MAX_RETRIES = 20;
   // STEP 10: Prevent multiple polling loops
   const isPollingRef = useRef(false);
+  // Frontend state sync guards (prevent request storms)
+  const syncInFlightRef = useRef(null);
+  const lastSyncAtRef = useRef(0);
+
+  // Canonical UI derivation from authoritative agentState
+  const deriveDataFromAgentState = useCallback((userId, mappedState) => {
+    const goals = mappedState?.goals || [];
+    const recommendations = mappedState?.recommendations || [];
+    return {
+      user: userId,
+      weak_topics: goals.map(g => ({
+        topic: g.topic,
+        confidence: g.current_score,
+        score: g.current_score,
+        goal: `Reach ${g.target_score}% success`,
+        strategy: g.strategy || `Focus on ${g.topic?.toLowerCase()} patterns`,
+        evidence: g.evidence || [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
+      })),
+      recommended_problems: recommendations,
+      agentic: mappedState
+    };
+  }, []);
+
+  // Keep `data` always in sync with canonical `agentState`.
+  // This prevents pages that still read `data.*` from drifting stale.
+  useEffect(() => {
+    if (!user || !agentState) return;
+    const derived = deriveDataFromAgentState(user, agentState);
+    setData(prev => {
+      const prevUpdatedAt = prev?.agentic?.lastUpdated || prev?.agentic?.updatedAt || null;
+      const nextUpdatedAt = agentState?.lastUpdated || null;
+      if (prevUpdatedAt && nextUpdatedAt && prevUpdatedAt === nextUpdatedAt) {
+        return prev; // no churn
+      }
+      console.log('[State Sync]', {
+        source: 'agentState->data',
+        user,
+        updatedAt: nextUpdatedAt,
+        version: agentState?.version || null,
+        recommendationsCount: derived?.recommended_problems?.length || 0
+      });
+      localStorage.setItem('debugmind_data', JSON.stringify(derived));
+      return derived;
+    });
+  }, [user, agentState?.lastUpdated, agentState?.version, deriveDataFromAgentState]);
 
   // ============================================
   // AUTHENTICATION FUNCTIONS
@@ -190,7 +235,19 @@ export function AppProvider({ children }) {
 
     try {
       console.log('[UI] Loading user data from DB for:', userId);
-      const res = await fetch(`${API_BASE_URL}/load-user-data/${userId}`);
+      const res = await fetch(`${API_BASE_URL}/load-user-data/${userId}?t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-store',
+          'Pragma': 'no-cache'
+        }
+      });
+
+      if (res.status === 304) {
+        console.warn('[State Sync] load-user-data returned 304, forcing agent-state refresh');
+        await fetchAgentState(userId, true);
+        return null;
+      }
 
       if (!res.ok) {
         console.log('[UI] No stored data for user');
@@ -282,20 +339,8 @@ export function AppProvider({ children }) {
       console.log('[UI] ✓ Recommendations from DB:', recommendedProblems.length);
 
       // Build data object for UI components — use goals from agentOutput
-      const goals = agentStateData.goals || [];
       const dataObj = {
-        user: userId,
-        weak_topics: goals.map(g => ({
-          topic: g.topic,
-          confidence: g.current_score,
-          score: g.current_score,
-          goal: `Reach ${g.target_score}% success`,
-          strategy: g.strategy || `Focus on ${g.topic?.toLowerCase()} patterns`,
-          evidence: g.evidence || [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
-        })),
-        // FIX: Include recommended_problems from DB
-        recommended_problems: recommendedProblems,
-        agentic: agentOutput || {},
+        ...deriveDataFromAgentState(userId, agentStateData),
         submissionDocs: userData.submissionDocs || []
       };
 
@@ -316,7 +361,7 @@ export function AppProvider({ children }) {
       setDataStatus('no_data');
       return null;
     }
-  }, []);
+  }, [deriveDataFromAgentState]);
 
   // Auth logout
   const authLogout = useCallback(() => {
@@ -533,21 +578,15 @@ export function AppProvider({ children }) {
         setIsPolling(false);
 
         // Build data object for hasData check
-        const dataObj = {
-          user: sanitizedUserId,
-          weak_topics: mappedState.goals?.map(g => ({
-            topic: g.topic,
-            confidence: g.current_score,
-            score: g.current_score,
-            goal: `Reach ${g.target_score}% success`,
-            strategy: `Focus on ${g.topic?.toLowerCase()} patterns`,
-            evidence: [`Current: ${g.current_score}%`, `Target: ${g.target_score}%`]
-          })) || [],
-          recommended_problems: mappedState.recommendations || [],
-          agentic: mappedState
-        };
+        const dataObj = deriveDataFromAgentState(sanitizedUserId, mappedState);
         setData(dataObj);
         localStorage.setItem('debugmind_data', JSON.stringify(dataObj));
+        console.log('[State Sync]', {
+          source: 'fetchAgentState',
+          userId: sanitizedUserId,
+          updatedAt: mappedState.lastUpdated,
+          version: mappedState.version
+        });
 
         console.log('[AppContext] ✓ Data from agent state', {
           recommendationsCount: state.recommendations?.length || 0
@@ -587,7 +626,29 @@ export function AppProvider({ children }) {
       setTimeout(() => fetchAgentState(sanitizedUserId, force), 1500);
       return null;
     }
-  }, []);
+  }, [deriveDataFromAgentState]);
+
+  // Lightweight freshness sync for page mounts (throttled + deduped)
+  const syncFreshState = useCallback(async (userId) => {
+    if (!userId) return null;
+    const now = Date.now();
+    if (syncInFlightRef.current) return syncInFlightRef.current;
+    if (now - lastSyncAtRef.current < 1200) return null;
+    lastSyncAtRef.current = now;
+    console.log('[State Sync]', { event: 'mount-sync:start', userId, at: now });
+    syncInFlightRef.current = fetchAgentState(userId, true)
+      .finally(() => {
+        syncInFlightRef.current = null;
+      });
+    const result = await syncInFlightRef.current;
+    console.log('[State Sync]', {
+      event: 'mount-sync:done',
+      userId,
+      updatedAt: result?.agentOutput?.updatedAt || null,
+      version: result?.version || null
+    });
+    return result;
+  }, [fetchAgentState]);
 
   // Analyze profile
   const analyze = useCallback(async (profileUrl) => {
@@ -717,17 +778,18 @@ export function AppProvider({ children }) {
   // Load cached data on mount
   useEffect(() => {
     const cachedData = localStorage.getItem('debugmind_data');
-    if (cachedData && user) {
+    if (cachedData && user && !data && !agentState) {
       try {
-        setData(JSON.parse(cachedData));
-        setIsPolling(true);
+        const parsed = JSON.parse(cachedData);
+        setData(parsed);
+        console.log('[State Sync]', { source: 'localStorage:fallback', user, hasAgentState: !!agentState });
       } catch (e) {
         localStorage.removeItem('debugmind_data');
       }
     }
 
     // Code analysis cache loading removed — LLM analysis now comes from DB via loadUserDataFromDB
-  }, [user]);
+  }, [user, data, agentState]);
 
   // Polling for agent state
   useEffect(() => {
@@ -807,6 +869,7 @@ export function AppProvider({ children }) {
     logout,
     analyze,
     fetchAgentState,
+    syncFreshState,
     fetchCodeAnalysis,
     advanceDay,
     refreshData,

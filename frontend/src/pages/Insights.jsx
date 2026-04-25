@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { 
   Zap, AlertTriangle, ArrowRight, Brain, TrendingUp, TrendingDown, 
@@ -7,6 +7,8 @@ import {
 import { useApp } from '../context/AppContext';
 import { EmptyState } from '../components/Loader';
 import { Card, Badge, DecisionTimeline } from '../components/ui';
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
 
 // Learning velocity badge component
 const VelocityBadge = ({ velocity }) => {
@@ -128,28 +130,49 @@ const ErrorPatternCard = ({ error }) => {
 
 export default function Insights() {
   const navigate = useNavigate();
-  const { user, data, hasData, agentState } = useApp();
+  const { user, data, hasData, agentState, syncFreshState } = useApp();
+  const [snapshotLoopCount, setSnapshotLoopCount] = useState(0);
 
   useEffect(() => {
     if (!user) navigate('/');
   }, [user, navigate]);
 
-  if (!hasData) {
-    return (
-      <EmptyState
-        title="No Insights Available"
-        message="Run an analysis to discover insights about your coding patterns."
-        icon={Zap}
-        action={
-          <Link to="/" className="btn-primary inline-flex items-center gap-2">
-            Start Analysis <ArrowRight size={18} />
-          </Link>
-        }
-      />
-    );
-  }
+  useEffect(() => {
+    if (!user) return;
+    console.log('[State Sync]', {
+      page: 'Insights',
+      event: 'mount-sync',
+      user,
+      incomingUpdatedAt: agentState?.lastUpdated || null,
+      incomingVersion: agentState?.version || null
+    });
+    syncFreshState(user);
+  }, [user, syncFreshState]);
 
-  // Extract diagnosis data
+  useEffect(() => {
+    let active = true;
+    if (!user) return;
+
+    const loadProgressHistory = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/progress-history/${user}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!active) return;
+        const snapshots = json?.snapshots || json?.history || [];
+        setSnapshotLoopCount(Array.isArray(snapshots) ? snapshots.length : 0);
+      } catch (err) {
+        console.warn('[Insights] Failed to fetch progress history for loops count:', err?.message);
+      }
+    };
+
+    loadProgressHistory();
+    return () => {
+      active = false;
+    };
+  }, [user, agentState?.lastUpdated]);
+
+  // Extract diagnosis data (canonical from agentState when available)
   const diagnosis = agentState?.diagnosis || data;
   const learningVelocity = diagnosis?.learning_velocity;
   const behavioralPatterns = diagnosis?.behavioral_patterns || [];
@@ -159,7 +182,163 @@ export default function Insights() {
 
   // Format and deduplicate weak topics
   const processedWeakTopics = React.useMemo(() => {
-    const rawTopics = data.weak_topics || [];
+    const byTopic = agentState?.progress?.by_topic || {};
+    const weakTopicsFromData = Array.isArray(data?.weak_topics) ? data.weak_topics : [];
+
+    const normalizeEvidenceArray = (value) => {
+      if (!value) return [];
+      const arr = Array.isArray(value) ? value : [value];
+      return arr
+        .map((item) => (typeof item === 'string' ? item.trim() : String(item || '').trim()))
+        .filter(Boolean)
+        // Drop goal-metric lines that are not diagnostic evidence
+        .filter((line) => {
+          const low = line.toLowerCase();
+          return !(low.startsWith('current') || low.startsWith('target'));
+        });
+    };
+
+    const buildTopicEvidence = (topicName, matchingWeakTopic, goalLike) => {
+      const topicStats = byTopic?.[topicName] || {};
+      const accepted = Number(topicStats?.accepted || 0);
+      const total = Number(topicStats?.total || 0);
+      const failed = Math.max(0, total - accepted);
+      const errorEntries = topicStats?.error_types ? Object.entries(topicStats.error_types) : [];
+      const strategyText = String(goalLike?.strategy || '').toLowerCase();
+      const topErrorType = errorEntries.length > 0
+        ? [...errorEntries].sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0]?.[0]
+        : null;
+      const interpretErrorPattern = (type, count) => {
+        const label = `${type} occurred ${count} time${count === 1 ? '' : 's'}`;
+        const normalized = String(type || '').toLowerCase();
+        if (normalized.includes('wrong answer')) {
+          return `Recurring ${label.toLowerCase()}, indicating logic or boundary-condition mismatches`;
+        }
+        if (normalized.includes('time limit exceeded')) {
+          return `Recurring ${label.toLowerCase()}, indicating algorithmic efficiency bottlenecks`;
+        }
+        if (normalized.includes('runtime error')) {
+          return `Recurring ${label.toLowerCase()}, indicating unchecked edge-case/runtime paths`;
+        }
+        if (normalized.includes('compile error')) {
+          return `Recurring ${label.toLowerCase()}, indicating syntax or type-consistency issues`;
+        }
+        return label;
+      };
+      const getTopicHypothesis = (topic, dominantError, strategy) => {
+        const t = String(topic || '').toLowerCase();
+        const e = String(dominantError || '').toLowerCase();
+        const hasWrongAnswer = e.includes('wrong answer');
+        const hasTle = e.includes('time limit exceeded');
+        const hasRuntime = e.includes('runtime error');
+
+        if (t.includes('arrays') || t.includes('hash')) {
+          if (hasWrongAnswer) return 'Boundary/index handling mistakes are likely contributing to repeated wrong answers';
+          if (strategy.includes('multi-pass') || strategy.includes('hash')) return 'Multi-pass or hash-state reasoning may need reinforcement';
+        }
+        if (t.includes('binary search')) {
+          if (hasWrongAnswer) return 'Boundary-update and off-by-one mistakes are likely affecting search correctness';
+          if (hasRuntime || strategy.includes('pattern')) return 'Search-space narrowing logic may need stronger invariant checks';
+        }
+        if (t.includes('sliding window')) {
+          if (hasWrongAnswer) return 'Window expand/shrink transition mistakes may be driving repeated wrong answers';
+          if (hasRuntime) return 'Window boundary guards may be missing on edge-case transitions';
+        }
+        if (t.includes('dynamic programming')) {
+          if (hasRuntime) return 'State transition or base-case handling appears unstable in some DP attempts';
+          if (hasTle) return 'DP state optimization may be needed to avoid repeated high-cost transitions';
+        }
+        return null;
+      };
+      const topicHypothesis = getTopicHypothesis(topicName, topErrorType, strategyText);
+
+      // 1) Real topic-specific monitoring errors/patterns
+      if (errorEntries.length > 0) {
+        const sorted = [...errorEntries].sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0));
+        const topErrors = sorted.slice(0, 3).map(([type, count]) => interpretErrorPattern(type, Number(count || 0)));
+        // If we already have a topic-aware Wrong Answer hypothesis, skip duplicative generic Wrong Answer line
+        const dedupedErrors = topicHypothesis
+          ? topErrors.filter((line) => !line.toLowerCase().includes('wrong answer occurred'))
+          : topErrors;
+        const diagnostics = [
+          topicHypothesis,
+          total > 0 ? `${failed} failed attempts contributed to this focus area` : null,
+          ...dedupedErrors
+        ].filter(Boolean);
+        if (diagnostics.length > 0) return diagnostics;
+      }
+
+      // 2) Existing weak-topic / related-errors evidence payloads
+      const weakTopicEvidence = normalizeEvidenceArray(matchingWeakTopic?.evidence);
+      if (weakTopicEvidence.length > 0) return weakTopicEvidence;
+
+      const relatedErrors = normalizeEvidenceArray(
+        goalLike?.related_errors || goalLike?.relatedErrors || goalLike?.evidence
+      );
+      if (relatedErrors.length > 0) return relatedErrors;
+
+      // 3) Derived topic stats evidence (even without explicit error types)
+      if (total > 0) {
+        return [
+          topicHypothesis,
+          `${failed} failed attempts contributed to this focus area`,
+          failed > 0
+            ? 'Failure pattern detected across recent attempts in this topic'
+            : 'Limited failure evidence; continue attempts to refine diagnostics'
+        ];
+      }
+
+      // 4) Final fallback (short diagnostic, no fabricated specifics)
+      const fallbackText = String(goalLike?.description || goalLike?.strategy || '').toLowerCase();
+      const isEdgeCaseTopic = String(topicName || '').toLowerCase().includes('edge case');
+      const isConceptTopic = String(topicName || '').toLowerCase().includes('concept improvement');
+      const hasNullOrEmptyCue = fallbackText.includes('empty') || fallbackText.includes('null');
+      const hasSmallInputCue = fallbackText.includes('less than') || fallbackText.includes('length 1') || fallbackText.includes('length 2');
+      const hasDuplicateCue = fallbackText.includes('duplicate');
+      const hasBoundaryCue = fallbackText.includes('edge case') || fallbackText.includes('boundary');
+
+      if (isEdgeCaseTopic || hasBoundaryCue || hasNullOrEmptyCue || hasSmallInputCue) {
+        const details = [];
+        if (hasNullOrEmptyCue) details.push('empty inputs and null cases');
+        if (hasSmallInputCue) details.push('undersized arrays and minimum-length cases');
+        if (details.length === 0) details.push('boundary and extreme-constraint inputs');
+        return [
+          'Recent patterns suggest boundary-input handling needs reinforcement.',
+          `Focus on ${details.join(', ')}.`
+        ];
+      }
+
+      if (isConceptTopic || hasDuplicateCue) {
+        const detail = hasDuplicateCue
+          ? 'Focus on duplicate-handling rules and invariant consistency across cases.'
+          : 'Focus on strengthening underlying problem-solving patterns.';
+        return [
+          'Recent attempts suggest conceptual reinforcement is needed.',
+          detail
+        ];
+      }
+
+      return [
+        'Recent patterns suggest this area needs additional reinforcement.',
+        fallbackText
+          ? `Focus on this pattern from recent analysis: ${goalLike?.description || goalLike?.strategy}.`
+          : 'Focus on core patterns and validate edge conditions during practice.'
+      ];
+    };
+
+    const rawTopics = (agentState?.goals || []).map(g => {
+      const topicName = g.topic;
+      const matchingWeakTopic = weakTopicsFromData.find(wt => wt?.topic === topicName);
+      const diagnosticEvidence = buildTopicEvidence(topicName, matchingWeakTopic, g);
+
+      return {
+        topic: g.topic,
+        confidence: g.current_score,
+        score: g.current_score,
+        strategy: g.strategy || '',
+        evidence: diagnosticEvidence
+      };
+    }) || (data.weak_topics || []);
     const dedupMap = new Map();
     
     rawTopics.forEach(t => {
@@ -188,7 +367,33 @@ export default function Insights() {
     });
     
     return Array.from(dedupMap.values());
-  }, [data.weak_topics]);
+  }, [agentState?.goals, agentState?.progress?.by_topic, data?.weak_topics]);
+
+  useEffect(() => {
+    const byTopic = agentState?.progress?.by_topic || {};
+    const dp = byTopic['Dynamic Programming'];
+    console.log('[Insights Sync]', {
+      updatedAt: agentState?.lastUpdated || null,
+      version: agentState?.version || null,
+      goalsCount: agentState?.goals?.length || 0,
+      dp: dp ? { total: dp.total, accepted: dp.accepted, successRate: dp.successRate || dp.success_rate } : null
+    });
+  }, [agentState?.lastUpdated, agentState?.version, agentState?.progress?.by_topic, agentState?.goals]);
+
+  if (!hasData) {
+    return (
+      <EmptyState
+        title="No Insights Available"
+        message="Run an analysis to discover insights about your coding patterns."
+        icon={Zap}
+        action={
+          <Link to="/" className="btn-primary inline-flex items-center gap-2">
+            Start Analysis <ArrowRight size={18} />
+          </Link>
+        }
+      />
+    );
+  }
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -335,7 +540,7 @@ export default function Insights() {
           <div className="text-xs text-slate-500 mt-1">Error Types</div>
         </Card>
         <Card className="p-4 text-center">
-          <div className="text-3xl font-bold text-emerald-400">{agentState?.agent_loop?.total_runs || 0}</div>
+          <div className="text-3xl font-bold text-emerald-400">{snapshotLoopCount}</div>
           <div className="text-xs text-slate-500 mt-1">Agent Loops</div>
         </Card>
       </div>

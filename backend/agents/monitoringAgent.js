@@ -678,29 +678,44 @@ function getStatusEmoji(status) {
 const UI_TOPIC_MAP = {
   'sliding window': 'Sliding Window',
   'slidingwindow': 'Sliding Window',
+  'sliding-window': 'Sliding Window',
   'dynamic programming': 'Dynamic Programming',
   'dp': 'Dynamic Programming',
+  'dynamic-programming': 'Dynamic Programming',
   'binary search': 'Binary Search',
   'binarysearch': 'Binary Search',
+  'binary-search': 'Binary Search',
   'two pointers': 'Two Pointers',
   'twopointers': 'Two Pointers',
   'two pointer': 'Two Pointers',
+  'two-pointers': 'Two Pointers',
   'arrays & hashing': 'Arrays & Hashing',
   'arrays': 'Arrays & Hashing',
+  'array': 'Arrays & Hashing',
+  'hash table': 'Arrays & Hashing',
+  'hash-table': 'Arrays & Hashing',
+  'hashmap': 'Arrays & Hashing',
   'linked list': 'Linked List',
   'linkedlist': 'Linked List',
+  'linked-list': 'Linked List',
   'trees': 'Trees',
+  'tree': 'Trees',
   'binary tree': 'Trees',
+  'binary-tree': 'Trees',
   'graphs': 'Graphs',
   'graph': 'Graphs',
   'stack & queue': 'Stack & Queue',
   'stack': 'Stack & Queue',
+  'queue': 'Stack & Queue',
   'backtracking': 'Backtracking',
   'greedy': 'Greedy',
   'heap/priority queue': 'Heap/Priority Queue',
   'heap': 'Heap/Priority Queue',
+  'priority queue': 'Heap/Priority Queue',
   'bit manipulation': 'Bit Manipulation',
+  'bit-manipulation': 'Bit Manipulation',
   'math & geometry': 'Math & Geometry',
+  'math': 'Math & Geometry',
   'general problem solving': 'General'
 };
 
@@ -709,8 +724,10 @@ const UI_TOPIC_MAP = {
  */
 function normalizeTopicDisplay(topic) {
   if (!topic) return 'General';
-  const lower = topic.toLowerCase().trim();
-  return UI_TOPIC_MAP[lower] || topic; // Preserve original casing if no mapping
+  const lower = topic.toLowerCase().trim().replace(/[_-]/g, ' ');
+  const mapped = UI_TOPIC_MAP[lower] || UI_TOPIC_MAP[topic.toLowerCase().trim()] || topic;
+  console.log('[Topic Mapping]', { raw: topic, normalized: lower, mapped });
+  return mapped;
 }
 
 /**
@@ -722,7 +739,10 @@ function analyzeByTopic(submissions, classifyProblem) {
 
   submissions.forEach(sub => {
     // STEP 4: Merge DB topics + inferred topics from title
-    let topics = sub.topics || [];
+    let topics = [
+      ...(Array.isArray(sub.topics) ? sub.topics : []),
+      ...(Array.isArray(sub.topicTags) ? sub.topicTags : [])
+    ];
 
     if (!topics.length) {
       topics = inferTopicsFromTitle(sub.title);
@@ -813,6 +833,30 @@ function analyzeByTopic(submissions, classifyProblem) {
       total: v.total, accepted: v.accepted, successRate: v.success_rate
     }])
   ));
+  const dpStats = byTopic['Dynamic Programming'];
+  const swStats = byTopic['Sliding Window'];
+  if (dpStats) {
+    console.log('[Topic Recompute] Dynamic Programming:', {
+      before: 'n/a',
+      after: {
+        total: dpStats.total,
+        accepted: dpStats.accepted,
+        failed: Math.max(0, (dpStats.total || 0) - (dpStats.accepted || 0)),
+        successRate: dpStats.success_rate
+      }
+    });
+  }
+  if (swStats) {
+    console.log('[Topic Recompute] Sliding Window:', {
+      before: 'n/a',
+      after: {
+        total: swStats.total,
+        accepted: swStats.accepted,
+        failed: Math.max(0, (swStats.total || 0) - (swStats.accepted || 0)),
+        successRate: swStats.success_rate
+      }
+    });
+  }
 
   return byTopic;
 }

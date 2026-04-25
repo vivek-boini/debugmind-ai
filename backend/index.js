@@ -217,11 +217,15 @@ app.post('/extract', async (req, res) => {
         // Fix 3: If no new submissions, skip entire agent + LLM pipeline
         if (newSubmissionsCount === 0) {
           console.log("[Pipeline] No new submissions, skipping pipeline");
-
-          memory.updateState(userId, { status: "ready" });
+          memory.updateState(sanitizedUsername, { status: "ready" });
 
           return;
         }
+        console.log('[Progress Debug]', {
+          userId: sanitizedUsername,
+          newSubmissionsCount,
+          message: 'Forcing fresh monitoring recomputation from full submissions history'
+        });
 
         // STEP 5: Ensure pipeline only finishes AFTER everything is awaited sequentially
         console.log(`[PIPELINE] Agent started for: ${sanitizedUsername}`);
@@ -521,11 +525,22 @@ app.get('/progress-history/:userId', validateUserId, async (req, res) => {
   try {
     const snapshots = await dbService.getProgressHistory(req.userId, 10);
     const trend = await dbService.getImprovementTrend(req.userId);
+    const trendInputs = (snapshots || []).map(s => ({
+      at: s.createdAt,
+      successRate: s.overallStats?.successRate || 0
+    }));
+    console.log('[Progress Debug]', {
+      userId: req.userId,
+      historyCount: snapshots?.length || 0,
+      snapshotCount: snapshots?.length || 0,
+      trendInputs: trendInputs.slice(0, 10)
+    });
 
     res.json({
       status: 'ok',
       userId: req.userId,
       snapshots: snapshots || [],
+      history: snapshots || [],
       trend: trend || { trend: 'insufficient_data' },
       count: snapshots?.length || 0
     });
@@ -1074,7 +1089,7 @@ app.get('/user-stats/:userId', validateUserId, async (req, res) => {
  * GET /progress-history/:userId
  * Get user's progress snapshots over time
  */
-app.get('/progress-history/:userId', validateUserId, async (req, res) => {
+app.get('/progress-history-db/:userId', validateUserId, async (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 30;
   const history = await dbService.getProgressHistory(req.userId, limit);
   const trend = await dbService.getImprovementTrend(req.userId);

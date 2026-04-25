@@ -839,6 +839,38 @@ export const AdaptationPanel = ({ adaptation }) => {
     pause_and_review: <Clock size={16} className="text-amber-400" />
   };
 
+  const focusTopics = (adaptation.topic_adaptations || []).map((t) => t.topic).filter(Boolean);
+  const stalledGoalTopics = (adaptation.goal_adjustments || []).map((g) => g.topic).filter(Boolean);
+  const priorityIssue = (adaptation.topic_adaptations || [])
+    .flatMap((t) => t.specific_issues || [])
+    .find(Boolean);
+  const diagnosticSubtitle = focusTopics.length > 0
+    ? `Momentum is stable; shift practice toward ${focusTopics.slice(0, 2).join(' and ')}.`
+    : stalledGoalTopics.length > 0
+      ? `Current strategy is stable, but ${stalledGoalTopics.slice(0, 2).join(' and ')} need reinforcement.`
+      : adaptation.reason;
+  const adaptationInsight = focusTopics.length > 0
+    ? `Current strategy works, but targeted reinforcement is recommended for ${focusTopics.slice(0, 2).join(' and ')}.`
+    : priorityIssue
+      ? `Current strategy is stable; ${priorityIssue.toLowerCase()} indicates extra review is recommended.`
+      : adaptation.strategy?.message;
+  const normalizedRecommendations = (adaptation.recommendations || []).map((rec) => {
+    const text = String(rec?.text || '').toLowerCase();
+    if (text.includes('keep practicing consistently') && focusTopics.length > 0) {
+      return {
+        ...rec,
+        text: `Prioritize ${focusTopics.slice(0, 2).join(' and ')} reinforcement this week`
+      };
+    }
+    if (text.includes('edge case') && priorityIssue) {
+      return {
+        ...rec,
+        text: `Add boundary-condition drills to address ${priorityIssue.toLowerCase()}`
+      };
+    }
+    return rec;
+  });
+
   return (
     <Card className="bg-linear-to-br from-accent-teal/5 to-transparent border-accent-teal/20">
       <div className="flex items-center justify-between mb-4">
@@ -846,7 +878,7 @@ export const AdaptationPanel = ({ adaptation }) => {
           <Activity size={18} className="text-accent-teal" />
           Strategy Adaptation
         </h3>
-        <Badge type="info">{Math.round(adaptation.confidence || 50)}% conf</Badge>
+        <Badge type="info">Strategy Confidence: {Math.round(adaptation.confidence || 50)}%</Badge>
       </div>
 
       <div className="flex items-start gap-3 mb-4">
@@ -855,7 +887,7 @@ export const AdaptationPanel = ({ adaptation }) => {
         </div>
         <div>
           <h4 className="font-semibold text-sm capitalize">{adaptation.action?.replace(/_/g, ' ')}</h4>
-          <p className="text-xs text-slate-400 mt-1">{adaptation.reason}</p>
+          <p className="text-xs text-slate-400 mt-1">{diagnosticSubtitle}</p>
         </div>
       </div>
 
@@ -866,17 +898,17 @@ export const AdaptationPanel = ({ adaptation }) => {
         </p>
       )}
 
-      {/* Strategy message if available */}
-      {adaptation.strategy?.message && (
+      {/* Adaptive insight from current signals */}
+      {adaptationInsight && (
         <div className="p-3 bg-accent-purple/10 rounded-lg border border-accent-purple/20 mb-4">
-          <p className="text-xs text-accent-purple font-medium">{adaptation.strategy.emoji} {adaptation.strategy.message}</p>
+          <p className="text-xs text-accent-purple font-medium">{adaptation.strategy?.emoji} {adaptationInsight}</p>
         </div>
       )}
 
-      {adaptation.recommendations?.length > 0 && (
+      {normalizedRecommendations.length > 0 && (
         <div className="space-y-2 mb-4">
           <h5 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Recommendations</h5>
-          {adaptation.recommendations.slice(0, 3).map((rec, idx) => (
+          {normalizedRecommendations.slice(0, 3).map((rec, idx) => (
             <div key={idx} className="flex items-start gap-2 p-2 bg-dark-900/50 rounded-lg text-xs">
               <CheckCircle2 size={12} className={`shrink-0 mt-0.5 ${
                 rec.priority === 'high' ? 'text-red-400' :

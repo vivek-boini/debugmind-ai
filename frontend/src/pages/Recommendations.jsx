@@ -119,8 +119,11 @@ const PersonalizationInfo = ({ plan }) => {
 
 export default function Recommendations() {
   const navigate = useNavigate();
-  const { user, data, hasData, agentState } = useApp();
+  const { user, data, hasData, agentState, syncFreshState } = useApp();
   const [selectedDifficulty, setSelectedDifficulty] = useState('ALL');
+
+  // Canonical recommendations source (computed before any early return)
+  const problems = agentState?.recommendations || data?.recommended_problems || [];
 
   // FIX STEP 4: Remove location/route dependencies - only check auth state
   useEffect(() => {
@@ -131,6 +134,37 @@ export default function Recommendations() {
     });
     if (!user) navigate('/');
   }, [user, navigate]); // FIXED: removed data?.recommended_problems dependency
+
+  useEffect(() => {
+    if (!user) return;
+    console.log('[Recommendations Refresh]', {
+      event: 'mount-sync',
+      user,
+      incomingUpdatedAt: agentState?.lastUpdated || null,
+      incomingVersion: agentState?.version || null
+    });
+    syncFreshState(user);
+  }, [user, syncFreshState]);
+
+  useEffect(() => {
+    console.log('[Recommendations Refresh]', {
+      event: 'state-change',
+      updatedAt: agentState?.lastUpdated || null,
+      version: agentState?.version || null,
+      recommendationsCount: data?.recommended_problems?.length || 0
+    });
+  }, [agentState?.lastUpdated, agentState?.version, data?.recommended_problems]);
+
+  useEffect(() => {
+    const byTopic = agentState?.progress?.by_topic || {};
+    const dp = byTopic['Dynamic Programming'];
+    console.log('[Recommendations Sync]', {
+      updatedAt: agentState?.lastUpdated || null,
+      version: agentState?.version || null,
+      recommendationsCount: problems.length,
+      dp: dp ? { total: dp.total, accepted: dp.accepted, successRate: dp.successRate || dp.success_rate } : null
+    });
+  }, [agentState?.lastUpdated, agentState?.version, agentState?.progress?.by_topic, problems.length]);
 
   if (!hasData) {
     return (
@@ -146,10 +180,6 @@ export default function Recommendations() {
       />
     );
   }
-
-  // FIX STEP 1: Use recommended_problems from DB as sole source of truth
-  // NEVER rebuild from plan — that causes inconsistency
-  const problems = data.recommended_problems || [];
 
   console.log('[Recommendations] ✓ Problems count:', problems.length);
   // FIX STEP 7: Debug logging

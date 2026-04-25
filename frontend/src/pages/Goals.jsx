@@ -181,30 +181,43 @@ const GoalsSummary = ({ goals }) => {
 
 export default function Goals() {
   const navigate = useNavigate();
-  const { user, hasData, agentState, advanceDay } = useApp();
+  const { user, hasData, agentState, advanceDay, syncFreshState } = useApp();
   const [expandedGoal, setExpandedGoal] = useState(null);
 
   useEffect(() => {
     if (!user) navigate('/');
   }, [user, navigate]);
 
-  if (!hasData) {
-    return (
-      <EmptyState
-        title="No Goals Set"
-        message="Complete an analysis first to generate personalized learning goals."
-        icon={Target}
-        action={
-          <Link to="/" className="btn-primary inline-flex items-center gap-2">
-            Start Analysis <ArrowRight size={18} />
-          </Link>
-        }
-      />
-    );
-  }
+  useEffect(() => {
+    if (!user) return;
+    console.log('[Goals Refresh]', {
+      event: 'mount-sync',
+      user,
+      incomingUpdatedAt: agentState?.lastUpdated || null,
+      incomingVersion: agentState?.version || null
+    });
+    syncFreshState(user);
+  }, [user, syncFreshState]);
 
-  const rawGoals = agentState?.goals || [];
-  const goalsData = agentState?.goals_data || {};
+  useEffect(() => {
+    console.log('[Goals Refresh]', {
+      event: 'state-change',
+      updatedAt: agentState?.lastUpdated || null,
+      version: agentState?.version || null,
+      goalsCount: agentState?.goals?.length || 0
+    });
+  }, [agentState?.lastUpdated, agentState?.version, agentState?.goals]);
+
+  useEffect(() => {
+    const byTopic = agentState?.progress?.by_topic || {};
+    const dp = byTopic['Dynamic Programming'];
+    console.log('[Goals Sync]', {
+      updatedAt: agentState?.lastUpdated || null,
+      version: agentState?.version || null,
+      goalsCount: agentState?.goals?.length || 0,
+      dp: dp ? { total: dp.total, accepted: dp.accepted, successRate: dp.successRate || dp.success_rate } : null
+    });
+  }, [agentState?.lastUpdated, agentState?.version, agentState?.progress?.by_topic, agentState?.goals]);
 
   // Text cleaning utility
   const formatText = (text, type = 'desc') => {
@@ -216,6 +229,9 @@ export default function Goals() {
     }
     return text;
   };
+
+  const rawGoals = agentState?.goals || [];
+  const goalsData = agentState?.goals_data || {};
 
   // Format and deduplicate goals
   const goals = React.useMemo(() => {
@@ -241,6 +257,21 @@ export default function Goals() {
     });
     return Array.from(dedupMap.values());
   }, [rawGoals]);
+
+  if (!hasData) {
+    return (
+      <EmptyState
+        title="No Goals Set"
+        message="Complete an analysis first to generate personalized learning goals."
+        icon={Target}
+        action={
+          <Link to="/" className="btn-primary inline-flex items-center gap-2">
+            Start Analysis <ArrowRight size={18} />
+          </Link>
+        }
+      />
+    );
+  }
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">

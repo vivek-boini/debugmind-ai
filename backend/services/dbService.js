@@ -344,7 +344,9 @@ async function getPreviousAgentOutput(userId) {
  */
 async function buildProgressStats(userId) {
   return safeOperation(async () => {
-    const submissions = await Submission.find({ userId: userId.toLowerCase().trim() }).lean();
+    const normalizedUserId = userId.toLowerCase().trim();
+    const submissions = await Submission.find({ userId: normalizedUserId }).lean();
+    const previousOutput = await AgentOutput.findOne({ userId: normalizedUserId }).sort({ updatedAt: -1, createdAt: -1 }).lean();
     
     // UI-friendly topic display names
     const UI_TOPIC_MAP = {
@@ -405,6 +407,46 @@ async function buildProgressStats(userId) {
 
     // Debug log
     console.log('[Topic Stats - DB]', topicScores);
+    const previousDP = previousOutput?.monitoring?.by_topic?.['Dynamic Programming'] || null;
+    const previousSW = previousOutput?.monitoring?.by_topic?.['Sliding Window'] || null;
+    const currentDP = topicStats['Dynamic Programming'] || null;
+    const currentSW = topicStats['Sliding Window'] || null;
+    console.log('[Topic Recompute] Dynamic Programming:', {
+      before: previousDP
+        ? {
+            total: previousDP.total || previousDP.attempts || 0,
+            accepted: previousDP.accepted || 0,
+            failed: Math.max(0, (previousDP.total || previousDP.attempts || 0) - (previousDP.accepted || 0)),
+            successRate: previousDP.successRate || previousDP.success_rate || 0
+          }
+        : null,
+      after: currentDP
+        ? {
+            total: currentDP.total || currentDP.attempts || 0,
+            accepted: currentDP.accepted || 0,
+            failed: Math.max(0, (currentDP.total || currentDP.attempts || 0) - (currentDP.accepted || 0)),
+            successRate: topicScores['Dynamic Programming'] || 0
+          }
+        : null
+    });
+    console.log('[Topic Recompute] Sliding Window:', {
+      before: previousSW
+        ? {
+            total: previousSW.total || previousSW.attempts || 0,
+            accepted: previousSW.accepted || 0,
+            failed: Math.max(0, (previousSW.total || previousSW.attempts || 0) - (previousSW.accepted || 0)),
+            successRate: previousSW.successRate || previousSW.success_rate || 0
+          }
+        : null,
+      after: currentSW
+        ? {
+            total: currentSW.total || currentSW.attempts || 0,
+            accepted: currentSW.accepted || 0,
+            failed: Math.max(0, (currentSW.total || currentSW.attempts || 0) - (currentSW.accepted || 0)),
+            successRate: topicScores['Sliding Window'] || 0
+          }
+        : null
+    });
 
     return {
       totalAttempts,
@@ -574,7 +616,9 @@ async function updateGoalProgress(goalId, currentValue) {
 async function createProgressSnapshotBackground(userId, sessionId, diagnosis, submissions) {
   return safeOperation(async () => {
     const snapshot = await ProgressSnapshot.createSnapshot(userId, sessionId, diagnosis, submissions);
-    console.log(`[DBService] Progress snapshot created for session: ${sessionId}`);
+    const totalSnapshots = await ProgressSnapshot.countDocuments({ userId: userId.toLowerCase().trim() });
+    console.log('[Snapshot Debug] [Snapshot] created', { userId, sessionId, snapshotId: snapshot?._id?.toString() });
+    console.log('[Snapshot Debug] [Snapshot] total snapshots', { userId, totalSnapshots });
     return snapshot;
   }, 'createProgressSnapshotBackground');
 }
@@ -606,6 +650,7 @@ async function getImprovementTrend(userId) {
 
     // Step 1: Handle insufficient data
     if (count <= 1) {
+      console.log('[Trend Debug]', { userId, snapshots: count, reason: 'insufficient_data' });
       return {
         trend: 'insufficient_data',
         change: 0,
@@ -693,7 +738,7 @@ async function getImprovementTrend(userId) {
     }
 
     // Debug log
-    console.log('[Trend Advanced]', { trend, change: finalChange, confidence, volatility: finalVolatility, strength, volatilityScore, directionConsistency });
+    console.log('[Trend Debug]', { trend, change: finalChange, confidence, volatility: finalVolatility, strength, volatilityScore, directionConsistency, snapshots: count });
 
     // Final response — all existing fields preserved + new extensions
     return {
@@ -776,9 +821,9 @@ async function persistExtractData(userId, submissions, loopResult, sessionId) {
     return null;
   }
 
-  // Fix 2: Guard — never overwrite valid data with empty agent output
-  if (!loopResult || !loopResult.goals || loopResult.goals.length === 0) {
-    console.log("[DB] Skipping empty agent output save — no goals produced");
+  // Guard: loopResult is required, but goals can be empty for incremental extracts.
+  if (!loopResult) {
+    console.log('[DB] Skipping persistence — empty loopResult');
     return null;
   }
 

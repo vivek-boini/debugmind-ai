@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { 
   TrendingUp, TrendingDown, Clock, Activity, ArrowRight, Minus, 
@@ -8,6 +8,8 @@ import {
 import { useApp } from '../context/AppContext';
 import { EmptyState } from '../components/Loader';
 import { Card, ConfidenceChart, StrategyEvolution, Badge, ProgressBar } from '../components/ui';
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
 
 // ── FIX 10: Normalize helper — logs warnings, does NOT silently mask ──
 function normalizeCount(value, fieldName) {
@@ -188,8 +190,15 @@ const LearningVelocityCard = ({ velocity, metrics }) => {
 const EngagementCard = ({ streaks }) => {
   if (!streaks) return null;
 
-  const currentStreak = normalizeCount(streaks.current_streak, 'current_streak');
-  const longestStreak = normalizeCount(streaks.longest_streak, 'longest_streak');
+  // Accept both legacy and current backend shapes
+  const currentStreak = normalizeCount(
+    streaks.current_streak ?? streaks.current,
+    'current_streak'
+  );
+  const longestStreak = normalizeCount(
+    streaks.longest_streak ?? streaks.longest,
+    'longest_streak'
+  );
 
   let engagementMessage, engagementColor, engagementBg, EngagementIcon;
 
@@ -628,6 +637,7 @@ const ProgressSummaryCard = ({ metrics, velocity, monitoring, lastUpdated }) => 
 export default function Progress() {
   const navigate = useNavigate();
   const { user, data, hasData, agentState, dataStatus, isPolling } = useApp();
+  const [progressHistoryData, setProgressHistoryData] = useState({ snapshots: [], trend: null });
 
   useEffect(() => {
     console.log('[Progress] Mount/Update', {
@@ -637,6 +647,35 @@ export default function Progress() {
     });
     if (!user) navigate('/');
   }, [user, navigate]);
+
+  useEffect(() => {
+    let active = true;
+    if (!user) return;
+
+    const loadProgressHistory = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/progress-history/${user}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!active) return;
+        const snapshots = json?.snapshots || json?.history || [];
+        const trend = json?.trend || null;
+        console.log('[Progress Debug]', {
+          source: '/progress-history',
+          snapshotCount: snapshots.length,
+          trendPoints: trend?.history?.length || 0
+        });
+        setProgressHistoryData({ snapshots, trend });
+      } catch (err) {
+        console.warn('[Progress Debug] Failed to fetch /progress-history fallback:', err?.message);
+      }
+    };
+
+    loadProgressHistory();
+    return () => {
+      active = false;
+    };
+  }, [user, agentState?.lastUpdated]);
 
   // ── FIX 14: Stable empty state — show loading during processing, not empty flicker ──
   if (dataStatus === 'unknown' && isPolling) {
@@ -696,15 +735,102 @@ export default function Progress() {
 
   // FIX 9: Safe data extraction with fallbacks
   const monitoring = agentState?.progress || {};
-  const learningVelocity = agentState?.diagnosis?.learning_velocity;
+  const rawLearningVelocity = agentState?.diagnosis?.learning_velocity;
+  const baseLearningVelocity = useMemo(() => {
+    if (!rawLearningVelocity) return rawLearningVelocity;
+    return {
+      ...rawLearningVelocity,
+      // Backend may return `change` instead of `rate_change`
+      rate_change: typeof rawLearningVelocity.rate_change === 'number'
+        ? rawLearningVelocity.rate_change
+        : (typeof rawLearningVelocity.change === 'number' ? rawLearningVelocity.change : undefined),
+      // Backend may return `description` instead of `message`
+      message: rawLearningVelocity.message || rawLearningVelocity.description
+    };
+  }, [rawLearningVelocity]);
   const streaks = monitoring.streaks;
   const byTopic = monitoring.by_topic;
   const insights = monitoring.insights;
   const metrics = agentState?.metrics || {};
-  const chartData = agentState?.confidence_history?.chart_data;
-  const overallTrend = agentState?.confidence_history?.overall_trend;
+  const chartDataFromState = agentState?.confidence_history?.chart_data;
+  const fallbackTrendHistory = progressHistoryData?.trend?.history || [];
+  const fallbackChartData = fallbackTrendHistory.length > 0 ? {
+    labels: fallbackTrendHistory.map(point => point.date),
+    datasets: [{
+      label: 'Success Rate',
+      data: fallbackTrendHistory.map(point => Number(point.successRate || 0))
+    }]
+  } : null;
+  const statePoints = chartDataFromState?.datasets?.[0]?.data?.length || 0;
+  const fallbackPoints = fallbackChartData?.datasets?.[0]?.data?.length || 0;
+  // Prefer the richer history source (fixes "only 2 sessions" when snapshots are longer)
+  const chartData = (fallbackPoints > statePoints) ? fallbackChartData : (statePoints > 0 ? chartDataFromState : fallbackChartData);
+  const overallTrend = useMemo(() => {
+    const t = progressHistoryData?.trend;
+    if (t?.trend) {
+      const directionMap = {
+        improving: 'improving',
+        declining: 'declining',
+        stable: 'stable',
+        insufficient_data: 'insufficient_data'
+      };
+      return {
+        direction: directionMap[t.trend] || t.trend,
+        message: t.explanation || t.trend,
+        change: typeof t.change === 'number' ? t.change : undefined
+      };
+    }
+    const stateTrend = agentState?.confidence_history?.overall_trend;
+    if (stateTrend?.direction || stateTrend?.message) return stateTrend;
+    return null;
+  }, [progressHistoryData?.trend, agentState?.confidence_history?.overall_trend]);
   const lastUpdated = agentState?.lastUpdated;
   const recommendations = data?.recommended_problems || [];
+  const snapshotCount = progressHistoryData?.snapshots?.length || 0;
+
+  // Velocity fallback from snapshot trend (fixes "not enough data" when learning_velocity is missing/stale)
+  const learningVelocity = useMemo(() => {
+    // Canonical source: snapshot-based trend used by ConfidenceChart.
+    // This keeps summary/needs-attention/chart trend numbers consistent.
+    if (
+      overallTrend?.direction &&
+      overallTrend.direction !== 'insufficient_data' &&
+      typeof overallTrend?.change === 'number'
+    ) {
+      return {
+        direction: overallTrend.direction,
+        rate_change: overallTrend.change,
+        message: overallTrend.message || baseLearningVelocity?.message
+      };
+    }
+
+    if (baseLearningVelocity?.direction) {
+      // Keep diagnosis velocity but enrich missing rate_change/message from normalized trend
+      if (typeof baseLearningVelocity?.rate_change !== 'number' && typeof overallTrend?.change === 'number') {
+        return {
+          ...baseLearningVelocity,
+          rate_change: overallTrend.change,
+          message: baseLearningVelocity.message || overallTrend.message
+        };
+      }
+      return baseLearningVelocity;
+    }
+    const t = progressHistoryData?.trend;
+    if (!t || !t.trend) return baseLearningVelocity;
+    const map = {
+      improving: 'improving',
+      declining: 'declining',
+      stable: 'stable',
+      insufficient_data: null
+    };
+    const dir = map[t.trend] || null;
+    if (!dir) return baseLearningVelocity;
+    return {
+      direction: dir,
+      rate_change: typeof t.change === 'number' ? t.change : undefined,
+      message: t.explanation || t.trend
+    };
+  }, [baseLearningVelocity, progressHistoryData?.trend, overallTrend?.change, overallTrend?.message]);
 
   // Build timeline events from available progress data
   const activityEvents = useMemo(() => {
@@ -758,6 +884,30 @@ export default function Progress() {
       }
     }
 
+    const snapshots = progressHistoryData?.snapshots || [];
+    if (snapshots.length > 0) {
+      snapshots.slice(0, 8).forEach((snapshot) => {
+        const ts = new Date(snapshot.createdAt).getTime();
+        if (!isNaN(ts)) {
+          entries.push({ ts, text: 'Extract event recorded' });
+        }
+        const delta = Number(snapshot?.comparisonToPrevious?.successRateChange || 0);
+        if (!isNaN(delta) && delta !== 0 && !isNaN(ts)) {
+          entries.push({
+            ts,
+            text: `Success rate ${delta > 0 ? 'improved' : 'declined'} by ${Math.abs(delta).toFixed(1)}%`
+          });
+        }
+        const topicStats = snapshot?.topicStats || {};
+        Object.entries(topicStats).forEach(([topic, stat]) => {
+          const rate = Number(stat?.successRate || 0);
+          if (rate > 0 && !isNaN(ts)) {
+            entries.push({ ts, text: `${topic} topic updated to ${Math.round(rate)}%` });
+          }
+        });
+      });
+    }
+
     const deduped = entries
       .filter((e) => typeof e.ts === 'number' && !isNaN(e.ts) && e.text)
       .sort((a, b) => b.ts - a.ts)
@@ -770,7 +920,7 @@ export default function Progress() {
       { ts: Date.now() - 1000, text: 'Problems analyzed' },
       { ts: Date.now() - 2000, text: 'Solve more to unlock trend details' }
     ];
-  }, [agentState?.agent_loop?.stage_history, chartData, data?.submissionDocs, lastUpdated, metrics?.total_submissions]);
+  }, [agentState?.agent_loop?.stage_history, chartData, data?.submissionDocs, lastUpdated, metrics?.total_submissions, progressHistoryData?.snapshots]);
 
   const topicEntries = useMemo(() => {
     if (!byTopic || Object.keys(byTopic).length === 0) return [];
@@ -853,7 +1003,7 @@ export default function Progress() {
               </Card>
               <Card className="p-4">
                 <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Agent Loops</div>
-                <div className="text-3xl font-bold text-accent-purple">{agentState?.agent_loop?.total_runs || 0}</div>
+                <div className="text-3xl font-bold text-accent-purple">{snapshotCount}</div>
               </Card>
             </div>
           </div>
